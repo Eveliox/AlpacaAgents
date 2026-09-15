@@ -23,15 +23,17 @@ class SymbolSnapshot:
     symbol: str
     bars: tuple                 # ascending Bar objects, last = most recent completed session
     chain: tuple                # OptionQuote objects
-    next_earnings: date | None  # None = unknown -> rejected (fail closed)
+    next_earnings: date | None  # None = unknown unless explicitly inapplicable for a supported ETF
     iv_rank: float | None = None
+    earnings_not_applicable: bool = False
+    valuation_day: date | None = None  # Quote/DTE date; bars may end on the preceding session.
 
 
 @dataclass(frozen=True)
 class ScanConfig:
     universe: frozenset = frozenset({"SPY", "QQQ", "IWM"})
     enabled_playbooks: frozenset = frozenset()      # nothing proposes until backtested + enabled
-    fee_per_contract: Decimal = Decimal("0.65")     # deliberate overestimate; tune to paper fills
+    fee_per_contract: Decimal = Decimal("0.65")     # placeholder estimate, not a verified broker fee
     max_risk: Decimal = Decimal("100")
     max_open_positions: int = 2
 
@@ -104,13 +106,15 @@ def _candidates(snap: SymbolSnapshot, config: ScanConfig, as_of: date, skipped: 
     def attach(playbook, signal, structure, preferred):
         if structure is None:
             return note(playbook, "no liquid contract in 30-45 DTE / delta band (or spread quality gate failed)")
-        if snap.next_earnings <= structure.expiration:
+        if snap.next_earnings is not None and snap.next_earnings <= structure.expiration:
             return note(playbook, f"earnings {snap.next_earnings} before expiration {structure.expiration}")
         idea = _build_idea(snap.symbol, playbook, signal, structure, config, as_of, preferred)
         if isinstance(idea, str):
             return note(playbook, idea)
+        idea["valuation_day"] = contract_day.isoformat()
         out.append(idea)
 
+    contract_day = snap.valuation_day if snap.valuation_day is not None else as_of
     trend = trend_signal(snap.bars)
     if isinstance(trend, Skip):
         note("trend_directional", trend.reason)
@@ -118,20 +122,20 @@ def _candidates(snap: SymbolSnapshot, config: ScanConfig, as_of: date, skipped: 
     else:
         right = right_for[trend.direction]
         prefer_spread = snap.iv_rank is None or snap.iv_rank >= IV_RANK_PREFER_SPREAD
-        attach("trend_directional", trend, select_long(snap.chain, right, as_of), not prefer_spread)
-        attach("trend_debit_spread", trend, select_debit_spread(snap.chain, right, as_of, config.max_risk), prefer_spread)
+        attach("trend_directional", trend, select_long(snap.chain, right, contract_day), not prefer_spread)
+        attach("trend_debit_spread", trend, select_debit_spread(snap.chain, right, contract_day, config.max_risk), prefer_spread)
 
     bounce = oversold_bounce_signal(snap.bars)
     if isinstance(bounce, Skip):
         note("oversold_bounce", bounce.reason)
     else:
-        attach("oversold_bounce", bounce, select_long(snap.chain, "call", as_of), True)
+        attach("oversold_bounce", bounce, select_long(snap.chain, "call", contract_day), True)
 
     breakout = breakout_signal(snap.bars)
     if isinstance(breakout, Skip):
         note("breakout_continuation", breakout.reason)
     else:
-        attach("breakout_continuation", breakout, select_debit_spread(snap.chain, "call", as_of, config.max_risk), True)
+        attach("breakout_continuation", breakout, select_debit_spread(snap.chain, "call", contract_day, config.max_risk), True)
     return out
 
 
@@ -150,8 +154,16 @@ def scan(snapshots, config: ScanConfig, *, as_of: date, open_symbols=frozenset()
         if sym in open_symbols:
             result.skipped.append({"symbol": sym, "playbook": "*", "reason": "one open idea per symbol"})
             continue
-        if snap.next_earnings is None:
+        if (type(snap.earnings_not_applicable) is not bool
+                or (snap.earnings_not_applicable and (sym not in INDEX_ETFS or snap.next_earnings is not None))):
+            result.skipped.append({"symbol": sym, "playbook": "*", "reason": "invalid earnings exemption"})
+            continue
+        if snap.next_earnings is None and not snap.earnings_not_applicable:
             result.skipped.append({"symbol": sym, "playbook": "*", "reason": "earnings date unknown; fail closed"})
+            continue
+        if ((snap.next_earnings is not None and type(snap.next_earnings) is not date)
+                or (snap.valuation_day is not None and (type(snap.valuation_day) is not date or snap.valuation_day < as_of))):
+            result.skipped.append({"symbol": sym, "playbook": "*", "reason": "invalid snapshot dates"})
             continue
         if not snap.bars or snap.bars[-1].day != as_of:
             result.skipped.append({"symbol": sym, "playbook": "*", "reason": "bars not current for session"})

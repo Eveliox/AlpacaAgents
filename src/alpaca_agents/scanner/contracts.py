@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+import math
 
 MIN_OPEN_INTEREST = 500
 MAX_SPREAD_OF_MID = Decimal("0.10")
@@ -32,10 +33,20 @@ class Structure:
 
 
 def is_liquid(q: OptionQuote) -> bool:
-    if q.open_interest < MIN_OPEN_INTEREST or q.bid <= 0 or q.ask < q.bid:
+    try:
+        if (type(q.expiration) is not date or q.right not in ("call", "put")
+                or type(q.open_interest) is not int or q.open_interest < MIN_OPEN_INTEREST
+                or any(not isinstance(v, Decimal) or not v.is_finite() for v in (q.strike, q.bid, q.ask))
+                or not 0 < q.strike < 100000 or q.strike * 1000 != (q.strike * 1000).to_integral_value()
+                or q.bid <= 0 or q.ask < q.bid
+                or any(v * 100 != (v * 100).to_integral_value() for v in (q.bid, q.ask))
+                or isinstance(q.delta, bool) or not isinstance(q.delta, (int, float)) or not math.isfinite(q.delta)
+                or not (0 < q.delta <= 1 if q.right == "call" else -1 <= q.delta < 0)):
+            return False
+        mid = (q.bid + q.ask) / 2
+        return (q.ask - q.bid) <= mid * MAX_SPREAD_OF_MID
+    except (ValueError, TypeError, AttributeError, ArithmeticError):
         return False
-    mid = (q.bid + q.ask) / 2
-    return (q.ask - q.bid) <= mid * MAX_SPREAD_OF_MID
 
 
 def _eligible(chain, right, as_of):
