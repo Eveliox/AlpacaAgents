@@ -133,19 +133,23 @@ class ReconcileTests(unittest.TestCase):
         kwargs.update(over)
         return reconcile(**kwargs)
 
-    def test_fully_consistent_state_reconciles_and_passes_rules(self):
+    def test_matching_positions_do_not_prove_settlement_or_complete_history(self):
         result = self.good()
-        self.assertEqual(result.reasons, ())
-        self.assertTrue(result.state.reconciled)
+        self.assertIn("SETTLEMENT_UNVERIFIED", result.reasons)
+        self.assertIn("HISTORY_COVERAGE_AND_FEES_UNVERIFIED", result.reasons)
+        self.assertIn("ORDER_PROVENANCE_UNVERIFIED", result.reasons)
+        self.assertFalse(result.state.reconciled)
         self.assertEqual(result.state.trading_day, DAY)
         self.assertEqual(result.state.open_positions, 1)
-        self.assertEqual(result.state.settled_cash, Decimal("1850.00"))   # min of cash-like fields
+        self.assertEqual(result.state.settled_cash, Decimal("0"))
+        self.assertEqual(result.details["broker_cash_fields_min"], "1850.00")
         idea = json.loads((Path(__file__).parent.parent / "examples/long_call.json").read_text())
         idea["symbol"] = "SPY"
         for leg in idea["legs"]:
             leg["symbol"] = "SPY"
         decision = evaluate(idea, result.state, now=NOW, trading_day=DAY, kill_switch=False)
-        self.assertTrue(decision["approved"], decision["reason"])
+        self.assertFalse(decision["approved"])
+        self.assertTrue(decision["reason"].startswith("STATE_UNAVAILABLE"))
 
     def test_every_failure_mode_yields_unreconciled_with_reason(self):
         cases = {
@@ -176,34 +180,40 @@ class ReconcileTests(unittest.TestCase):
                 decision = evaluate({}, result.state, now=NOW, trading_day=DAY, kill_switch=False)
                 self.assertEqual(decision["reason"].split(":")[0], "STATE_UNAVAILABLE")
 
-    def test_margin_paper_requires_explicit_opt_in(self):
+    def test_margin_override_is_not_available(self):
         self.assertFalse(self.good(account=account(multiplier="4")).state.reconciled)
-        self.assertTrue(self.good(account=account(multiplier="4"),
-                                  config=ReconcileConfig(allow_margin_paper=True)).state.reconciled)
+        with self.assertRaises(TypeError):
+            ReconcileConfig(allow_margin_paper=True)
 
-    def test_pending_entries_take_max_of_broker_and_local(self):
+    def test_pending_entries_are_conservative_until_identity_matching(self):
         result = self.good(open_orders=[{"asset_class": "us_option", "side": "buy"}], pending_local=0)
         self.assertEqual(result.state.pending_entries, 1)
         self.assertEqual(self.good(pending_local=2).state.pending_entries, 2)
         sells = self.good(open_orders=[{"asset_class": "us_option", "side": "sell"}])
         self.assertEqual(sells.state.pending_entries, 0)
-        self.assertTrue(sells.state.reconciled)
+        self.assertFalse(sells.state.reconciled)
+        both = self.good(open_orders=[{"asset_class": "us_option", "side": "buy"}], pending_local=1)
+        self.assertEqual(both.state.pending_entries, 2)
 
     def test_breaker_and_loss_flow_through(self):
         normalize_activities([fill("s1", "sell", price="0.45", when=NOW - timedelta(minutes=30))],
                              self.ledger, account_id="acct", recorded_at=NOW)
         result = self.good(positions=[], inventory=self.ledger.inventory(), ledger_summary=self.ledger.daily_summary(DAY))
-        self.assertTrue(result.state.reconciled)
+        self.assertFalse(result.state.reconciled)
         self.assertEqual(result.state.daily_realized_loss, Decimal("45"))
         self.assertTrue(result.state.breaker_tripped)
         decision = evaluate({}, result.state, now=NOW, trading_day=DAY, kill_switch=False)
-        self.assertEqual(decision["reason"].split(":")[0], "CIRCUIT_BREAKER")
+        self.assertEqual(decision["reason"].split(":")[0], "STATE_UNAVAILABLE")
 
-    def test_trading_day_pre_market_uses_next_open(self):
+    def test_next_open_cannot_roll_over_current_loss_day(self):
         pre = clock(is_open=False, stamp=datetime(2026, 9, 16, 11, 0, tzinfo=timezone.utc))
         self.assertEqual(trading_day_from_clock(pre), date(2026, 9, 16))
         pre["next_open"] = "2026-09-17T09:30:00-04:00"
-        self.assertEqual(trading_day_from_clock(pre), date(2026, 9, 17))
+        self.assertEqual(trading_day_from_clock(pre), date(2026, 9, 16))
+        closed = clock(is_open=False, stamp=NOW)
+        result = self.good(clock=closed)
+        self.assertEqual(result.state.trading_day, DAY)
+        self.assertIn("MARKET_CLOSED", result.reasons)
 
 
 class Response(BytesIO):
@@ -239,8 +249,8 @@ class BuildRiskStateTests(unittest.TestCase):
             })
             client = PaperClient(Credentials("k", "s"), TraceStore(Path(tmp) / "t.sqlite3"), opener=opener)
             result = build_risk_state(client, ledger, store, now=NOW)
-            self.assertEqual(result.reasons, ())
-            self.assertTrue(result.state.reconciled)
+            self.assertIn("SETTLEMENT_UNVERIFIED", result.reasons)
+            self.assertFalse(result.state.reconciled)
             self.assertEqual(ledger.inventory()[0]["contract"], CONTRACT)
             self.assertTrue(all(c.startswith("/v2/") for c in opener.calls))
             self.assertNotIn("/v2/orders", [c for c in opener.calls if "status" in c])  # GET only, open filter

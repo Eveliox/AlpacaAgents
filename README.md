@@ -5,8 +5,10 @@ Paper-only options swing-trading system, built safety-first.
 **Status: milestone 1 complete; milestone 2 in progress — read-only paper client,
 persistent accounting foundations, raw activity staging, and a Layer 1 scanner
 with a Polygon/Massive market-data adapter, shadow-only CLI, an
-underlying-level backtest replay, and fail-closed broker reconciliation that
-produces the rules engine's `RiskState`.**
+underlying-level backtest replay, broker-reconciliation diagnostics, and an
+offline single-use order-intent journal. Reconciliation cannot authorize trading
+until settlement, history/fee coverage, account eligibility and order provenance
+are verified; those four reasons are hard-coded and have no override.**
 No order submission, live configuration, scheduler, or dashboard exists yet. An `approved: true` result is a validation decision, not an executable
 authorization. Nothing in this repository places trades. Broker connectivity has
 only been tested using fake responses, not real credentials. The market-data
@@ -61,6 +63,10 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 - `src/alpaca_agents/executor/reconcile.py`: pure `reconcile()` cross-checks
   account, positions, open orders, clock and ledger; `build_risk_state()` wraps
   the read-only I/O. `eastern.py` gives tzdata-free ET session dates.
+- `src/alpaca_agents/executor/orders.py`: offline transactional order-intent
+  reservations, single-use claims and limit-order body preparation. No HTTP.
+- `tests/test_orders.py`: concurrent reserve/claim, cash/slot/rate/expiry limits,
+  kill-switch rechecks, replay rejection, restart binding, atomic-audit rollback.
 - `tests/test_reconcile.py`: every failure mode -> unreconciled with a reason ->
   rules engine rejects; end-to-end read-only build with a scripted transport.
 - `src/alpaca_agents/backtest/`: walk-forward replay of `signals.py` over daily
@@ -245,36 +251,50 @@ ledger database per account; do not mix accounts. Shape-valid OCC symbols alone
 do not verify contract eligibility or multiplier. No `RiskState` is generated,
 no scanner accounting import is exposed, and no orders can be submitted.
 
-## Reconciliation: broker + ledger -> RiskState
+## Reconciliation diagnostics: broker + ledger -> RiskState (blocked)
 
 ```sh
-python -m alpaca_agents.executor reconcile            # exit 0 reconciled, 2 not
+python -m alpaca_agents.executor reconcile            # exit 2: always unreconciled today
 ```
 
 `build_risk_state()` imports the last 7 days of activities, normalizes them into
 `FillLedger`, fetches account / positions / open orders / clock, and calls the
-pure `reconcile()`. It returns a `RiskState` plus a list of **reasons**; the
-state is `reconciled=True` only when the list is empty, and the rules engine
-rejects any unreconciled state before looking at an idea. Checks:
+pure `reconcile()`. It returns a `RiskState` plus a list of **reasons**. The rules
+engine rejects any state whose reason list is non-empty.
 
-- **Clock**: broker clock within 60s of local; trading day = ET date of the
-  current session if open, else of `next_open`. ET is derived without tzdata
-  (`eastern.py`, statutory DST rule; zoneinfo used when available).
+**Today the list is never empty.** Four reasons are hard-coded until the
+underlying verification exists, and no config flag or caller argument can clear
+them:
+
+- `SETTLEMENT_UNVERIFIED` - broker cash/buying-power fields are reported in
+  `details` but `settled_cash` is emitted as **0**. A conservative min() of
+  broker fields is not a verified T+1 settlement model.
+- `HISTORY_COVERAGE_AND_FEES_UNVERIFIED` - matching *current* positions cannot
+  prove that fully closed losing trades, late-billed fees or external activity
+  were all captured. A 7-day window is not proof of coverage.
+- `ORDER_PROVENANCE_UNVERIFIED` - open broker orders cannot yet be matched to
+  local reservations by ID, so pending entries are counted as broker **plus**
+  local (assumed disjoint), never `max()`.
+- `CASH_ACCOUNT_ELIGIBILITY_UNVERIFIED` - `multiplier == "1"` is checked, but
+  the paper account's actual cash-settlement behaviour has not been verified.
+  The earlier `--allow-margin-paper` override was removed: a margin paper
+  account is a reason, full stop.
+
+The checks that *can* pass or fail today (each adds its own reason):
+
+- **Clock**: broker clock within 60s of local; `MARKET_CLOSED` if `is_open` is
+  not `True`. The trading day is the **current Eastern date**, never
+  `next_open` - rolling to tomorrow's date early would reset today's loss
+  latch. This is a calendar date, not a verified exchange session. ET is derived
+  without tzdata (`eastern.py`, statutory DST rule; zoneinfo when available).
 - **Account**: `ACTIVE`; not trading/account blocked or user-suspended; not PDT;
-  `options_trading_level >= 2`; **`multiplier == "1"` (cash)**. Alpaca paper
-  accounts often default to margin (`"4"`); that fails reconciliation until you
-  pass `--allow-margin-paper` / `ReconcileConfig(allow_margin_paper=True)` as a
-  deliberate decision. Settled cash = min(`cash`, `non_marginable_buying_power`,
-  `options_buying_power`) minus local reservations - a conservative proxy, not a
-  verified T+1 settlement model.
+  `options_trading_level >= 2`; `multiplier == "1"`.
 - **Positions**: every broker position must be a standard long option and the
-  `{contract: qty}` map must equal the ledger's remaining lots exactly. Any
-  mismatch (missing opening history, unknown fills, shorts, equity from
-  assignment) is a reason.
-- **Open orders**: single-leg option orders only; buys count as pending entries
-  (`max(broker, local)`); multi-leg or non-option orders are reasons.
+  `{contract: qty}` map must equal the ledger's remaining lots exactly.
+- **Open orders**: single-leg option orders only; multi-leg or non-option
+  orders are reasons.
 - **History**: the activity import must have exhausted pagination through at
-  most 15 minutes ago, and normalization must have blocked nothing.
+  most 15 minutes ago (and not from the future); normalization blocked nothing.
 - **Ledger day** must match the trading day; realized loss and the breaker latch
   flow straight into `RiskState`.
 
@@ -289,8 +309,51 @@ date and count **fully toward the daily loss counter** (conservative, cents).
 `CSD/CSW/JNLC/INT/DIV` are ignored. `OPEXP`, `OPASN`, `OPEXC`, equity fills,
 fee credits and unknown types block reconciliation until handled explicitly.
 
-A reconciled state is a 60-second snapshot and **authorizes nothing by itself**;
-order submission with single-use authorization is still unimplemented.
+## Order-intent journal (offline; no HTTP, no submission)
+
+`OrderJournal(path, account_id=..., control_file=...)` is the executor-owned
+bridge between a rules decision and a future paper order. It is deliberately
+**not connected to any HTTP client**: `claim()` returns a prepared order body
+with `submission_enabled: False`, and there is no code path that sends it.
+
+```
+reserve(decision_key, idea, state_provider, now, trading_day)
+    -> {"approved", "reason", "idea", ["authorization_id", "expires_at"]}
+claim(authorization_id, state_provider, now, trading_day)
+    -> {"approved", "reason", "idea", ["prepared_order", "submission_enabled": False]}
+```
+
+- `state_provider` is a callable supplied by the trusted controller that returns
+  the *baseline* `RiskState` (excluding this journal's own reservations). The
+  scanner's only input is the unvalidated idea. Inside one `BEGIN IMMEDIATE`
+  transaction the journal adds every live reservation to `pending_entries`,
+  subtracts reserved cost from `settled_cash`, appends prior authorized
+  attempts to `order_attempts`, and re-runs the full `rules.evaluate()`.
+  The kill-switch file is re-read before **and after** the provider call.
+- `reserve` is single-use per `decision_key`, including rejected keys: a retry
+  is a new decision through full validation. One live intent per underlying.
+  Only `long_call` / `long_put` can be reserved; spreads are rejected as
+  `UNSUPPORTED_EXECUTION_STRUCTURE` because the translator, ledger and
+  reconciler are single-leg only.
+- Reservations expire after 30s if unclaimed. `claim` reloads the **stored**
+  idea (a mutated scanner object cannot change the body), revalidates against
+  everything except its own reservation, checks the trading day and clock, and
+  flips `reserved -> claimed` atomically **before** the body is returned.
+  A concurrent second claim gets `AUTHORIZATION_UNAVAILABLE`.
+- A `claimed` reservation **never auto-expires**. Once a body has been handed
+  out, a crash or send timeout could mean a live broker order; only a future
+  reconciler that matches `client_order_id` (`paper-<authorization_id>`) may
+  release it. Expiry alone must never free a claimed slot.
+- Prepared body: `symbol` = OCC contract, `qty "1"`, `side buy`, `type limit`,
+  `time_in_force day`, `limit_price` = the idea's cent-quantized `limit_debit`,
+  `position_intent buy_to_open`, idempotent `client_order_id`.
+- The journal is bound to one paper account id; reopening it for another
+  account raises. Every decision, expiry, claim and rejection is an audit event
+  written in the same transaction; audit failure rolls the decision back.
+
+Because `reconcile()` currently always returns an unreconciled state, the
+journal cannot approve anything against real broker data yet - `test_orders.py`
+drives it with synthetic `reconciled=True` states to prove the mechanics.
 
 ## Raw activity-history staging (read-only)
 
@@ -516,14 +579,20 @@ survivorship are not handled. Keep cached bars under `runtime/` (ignored).
    `https://paper-api.alpaca.markets`; no live path until owner sign-off. Verify
    options permissions and whether the broker actually supports the intended cash
    account behavior. Do not assume a paper account models settled cash correctly.
-2. ~~Activity normalization and reconciliation~~ done for long single-leg options.
-   Still needed: spreads (multi-leg positions/orders), expiration/assignment/
-   exercise handling, verified settlement, and a persistent order journal so
-   open orders have known provenance. Broker-backed
+2. Activity normalization and reconciliation *checks* exist for long single-leg
+   options, but four verifications are still hard-blocked: settlement (T+1
+   settled cash, not broker buying power), history/fee coverage (not just a
+   7-day window), cash-account eligibility, and open-order provenance (match
+   broker `client_order_id` to journal reservations). Also still needed:
+   spreads (multi-leg positions/orders) and expiration/assignment/exercise
+   handling. Broker-backed
    market/account data must go through the executor; scanner has no broker keys.
-3. Transactional decision IDs, single-use authorization, position/cash/rate
-   reservations, and kill-switch/risk revalidation immediately before submission.
-   JSON `approved: true` from a caller must never be sufficient authorization.
+3. ~~Transactional decision IDs, single-use authorization, position/cash/rate
+   reservations, kill-switch/risk revalidation at claim~~ done in `orders.py`,
+   offline. Still needed: the actual `POST /v2/orders` transport (paper URL,
+   idempotent `client_order_id`, no retry), a claimed->resolved transition
+   driven by broker order status, and treating any claimed intent with no
+   broker record as an incident, not a free slot.
 4. Limit-only debit entries; spreads submitted atomically as multi-leg orders,
    never independent legs. Verify entry trigger, quote freshness/liquidity,
    option eligibility, contract multiplier, and fees before authorization.

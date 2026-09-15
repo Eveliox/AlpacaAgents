@@ -1,4 +1,4 @@
-"""Broker + ledger -> RiskState. reconciled=True only when every check passes.
+"""Broker + ledger diagnostics. Authorization remains blocked pending evidence.
 
 Pure `reconcile()` takes already-fetched data so it is fully testable; the
 `build_risk_state()` wrapper does the read-only I/O. Every failed check is a
@@ -16,7 +16,6 @@ from .normalize import NormalizeResult, OCC, normalize_activities
 
 @dataclass(frozen=True)
 class ReconcileConfig:
-    allow_margin_paper: bool = False       # handover: cash account. Paper accounts often default to margin.
     min_options_level: int = 2             # long calls/puts. Spreads typically need 3.
     history_lag_limit: timedelta = timedelta(minutes=15)
     clock_skew_limit: timedelta = timedelta(seconds=60)
@@ -46,20 +45,27 @@ def _when(value) -> datetime:
 
 
 def trading_day_from_clock(clock: dict) -> date:
-    """Current session if open, otherwise the next session (pre-market/overnight)."""
+    """Current Eastern date; next_open must never reset today's loss latch early.
+
+    This is a calendar date, not a verified exchange session. Closed markets are
+    blocked separately until session-calendar integration exists.
+    """
     stamp = _when(clock["timestamp"])
-    if clock.get("is_open") is True:
-        return eastern_date(stamp)
-    if clock.get("is_open") is False:
-        return eastern_date(_when(clock["next_open"]))
-    raise ValueError
+    if type(clock.get("is_open")) is not bool:
+        raise ValueError
+    return eastern_date(stamp)
 
 
 def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict, ledger_summary: dict,
               inventory: list, normalization: NormalizeResult | None, history_query: dict | None,
               order_attempts: tuple, reserved_cash: Decimal, pending_local: int, now: datetime,
               config: ReconcileConfig = ReconcileConfig()) -> Reconciliation:
-    reasons, details = [], {}
+    # Matching current positions cannot prove that fully closed losing trades,
+    # late fees, external orders or unsettled proceeds are all accounted for.
+    # No caller-supplied override can clear these unfinished prerequisites.
+    reasons = ["SETTLEMENT_UNVERIFIED", "HISTORY_COVERAGE_AND_FEES_UNVERIFIED",
+               "ORDER_PROVENANCE_UNVERIFIED", "CASH_ACCOUNT_ELIGIBILITY_UNVERIFIED"]
+    details = {}
     if not isinstance(now, datetime) or now.tzinfo is None:
         raise ValueError("aware now required")
     now = now.astimezone(timezone.utc)
@@ -72,6 +78,8 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
             reasons.append(f"BROKER_CLOCK_SKEW: {int(skew.total_seconds())}s")
         trading_day = trading_day_from_clock(clock)
         details["market_open"] = clock.get("is_open")
+        if clock.get("is_open") is not True:
+            reasons.append("MARKET_CLOSED")
     except (KeyError, ValueError, TypeError):
         reasons.append("CLOCK_UNAVAILABLE: cannot determine exchange trading day")
         trading_day = eastern_date(now)   # placeholder only; state is unreconciled anyway
@@ -92,8 +100,8 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
         details["options_trading_level"] = level
         multiplier = str(account.get("multiplier"))
         details["multiplier"] = multiplier
-        if multiplier != "1" and not config.allow_margin_paper:
-            reasons.append(f"NOT_CASH_ACCOUNT: multiplier={multiplier} (set allow_margin_paper deliberately to proceed)")
+        if multiplier != "1":
+            reasons.append(f"NOT_CASH_ACCOUNT: multiplier={multiplier}")
         candidates = []
         for key in ("cash", "non_marginable_buying_power", "options_buying_power"):
             if key in account:
@@ -149,7 +157,8 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
     except (ValueError, TypeError, AttributeError) as exc:
         reasons.append(str(exc) or "OPEN_ORDERS_INVALID")
     details["open_orders"] = len(open_orders)
-    pending = max(pending_broker, pending_local)
+    # Until IDs can be matched, assume disjoint broker/local reservations.
+    pending = pending_broker + pending_local
 
     # --- history / ledger completeness --------------------------------------
     if normalization is None or not normalization.complete:
@@ -158,6 +167,8 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
             details["blocked_activities"] = list(normalization.blocked[:20])
     try:
         until = _when(history_query["until"])
+        if until > now:
+            reasons.append("HISTORY_FROM_FUTURE")
         if now - until > config.history_lag_limit:
             reasons.append(f"HISTORY_STALE: imported through {until.isoformat()}")
     except (KeyError, ValueError, TypeError):
@@ -170,7 +181,7 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
     details["breaker_tripped"] = breaker
 
     state = RiskState(trading_day=trading_day, observed_at=now, open_positions=len(broker_positions),
-                      pending_entries=pending, daily_realized_loss=daily_loss, settled_cash=settled,
+                      pending_entries=pending, daily_realized_loss=daily_loss, settled_cash=Decimal(0),
                       order_attempts=tuple(order_attempts), breaker_tripped=breaker, reconciled=not reasons)
     return Reconciliation(state, tuple(reasons), details)
 

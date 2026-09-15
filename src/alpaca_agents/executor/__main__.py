@@ -10,15 +10,13 @@ import sys
 from .client import Credentials, ExecutorError, PaperClient, TraceStore
 from .fills import FillLedger
 from .history import ActivityStore, import_activities
-from .reconcile import ReconcileConfig, build_risk_state
+from .reconcile import build_risk_state
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only Alpaca PAPER tools; cannot place orders")
     parser.add_argument("command", choices=("account", "traces", "import-activities", "reconcile"))
     parser.add_argument("--fills-db", type=Path, default=Path("runtime/fills.sqlite3"))
-    parser.add_argument("--allow-margin-paper", action="store_true",
-                        help="Deliberately accept a margin-multiplier paper account (handover assumes cash)")
     parser.add_argument("--trace-db", type=Path, default=Path("runtime/api-requests.sqlite3"))
     parser.add_argument("--history-db", type=Path, default=Path("runtime/activities.sqlite3"))
     parser.add_argument("--after", type=datetime.fromisoformat)
@@ -34,8 +32,7 @@ def main() -> int:
         elif args.command == "reconcile":
             client = PaperClient(Credentials.from_environment(), traces)
             result = build_risk_state(client, FillLedger(args.fills_db), ActivityStore(args.history_db),
-                                      now=datetime.now(timezone.utc),
-                                      config=ReconcileConfig(allow_margin_paper=args.allow_margin_paper))
+                                      now=datetime.now(timezone.utc))
             state = asdict(result.state)
             state["trading_day"] = state["trading_day"].isoformat()
             state["observed_at"] = state["observed_at"].isoformat()
@@ -44,7 +41,7 @@ def main() -> int:
             state["order_attempts"] = len(state["order_attempts"])
             print(json.dumps({"reconciled": result.state.reconciled, "reasons": list(result.reasons),
                               "state": state, "details": result.details}, indent=2, default=str))
-            print("A reconciled state is valid for 60 seconds and authorizes nothing by itself.", file=sys.stderr)
+            print("Diagnostic only: settlement/history/fees/order provenance are not verified; trading remains blocked.", file=sys.stderr)
             return 0 if result.state.reconciled else 2
         elif args.command == "import-activities":
             store = ActivityStore(args.history_db)
