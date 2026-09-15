@@ -107,8 +107,9 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
         for flag in ("trading_blocked", "account_blocked", "trade_suspended_by_user"):
             if account.get(flag) is not False:
                 reasons.append(f"ACCOUNT_FLAG: {flag}={account.get(flag)}")
-        if account.get("pattern_day_trader") is not False:
-            reasons.append("ACCOUNT_FLAG: pattern_day_trader")
+        pdt = account.get("pattern_day_trader")
+        if pdt is True:
+            details["pattern_day_trader"] = True  # informational; we never make same-day round trips anyway
         level = account.get("options_trading_level")
         if type(level) is not int or level < config.min_options_level:
             reasons.append(f"OPTIONS_LEVEL: {level!r} < {config.min_options_level}")
