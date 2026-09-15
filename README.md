@@ -2,7 +2,8 @@
 
 Paper-only options swing-trading system, built safety-first.
 
-**Status: milestone 1 complete; milestone 2 started with a read-only paper client.**
+**Status: milestone 1 complete; milestone 2 in progress — read-only paper client
+and persistent closed-trade accounting foundation.**
 No order submission, live configuration, scanner, scheduler, or dashboard exists
 yet. An `approved: true` result is a validation decision, not an executable
 authorization. Nothing in this repository places trades. Broker connectivity has
@@ -34,6 +35,9 @@ PYTHONPATH=src python -m unittest discover -s tests -v
   directly from a future controller.
 - `src/alpaca_agents/executor/`: exclusive broker boundary, read-only paper client,
   durable SQLite request traces, and manual connectivity CLI.
+- `src/alpaca_agents/executor/ledger.py`: duplicate-safe closed-trade accounting,
+  daily loss latches, and transactional close/breaker events.
+- `tests/test_ledger.py`: restart, replay, concurrency, rollback, and accounting tests.
 - `tests/test_executor.py`: fake-transport tests; no network or real credentials.
 - `examples/long_call.json`: synthetic input, not a current quote or recommendation.
 - `tests/test_rules.py`: rejection, boundary, spread, state, kill-switch, and audit tests.
@@ -129,6 +133,42 @@ reconciled `RiskState`. In particular, cash and options buying power do not prov
 settled cash or cash-account eligibility. The kill switch blocks trade validation,
 not these read-only support/reconciliation requests.
 
+## Persistent closed-trade ledger (offline foundation)
+
+`TradeLedger(Path("runtime/trades.sqlite3"))` accepts normalized `ClosedTrade`
+records from a **future trusted reconciler**, not scanner ideas. It computes:
+
+```
+realized P&L = total exit credit - total entry debit - actual entry/exit fees
+```
+
+Amounts are `Decimal` dollars per entire position lifecycle, not per-share option
+prices. Each position lifecycle and close must have a stable unique ID. Equivalent
+replays return `False` without changing totals; conflicting duplicates raise
+`LedgerError`. Corrections/busts are not silently overwritten and need a future
+explicit reconciliation workflow. Unknown fees must not be guessed as zero.
+
+A single SQLite transaction writes the close, its event, and (when cumulative
+losing-trade amounts reach $40) the day's breaker latch and trigger event. Audit
+failure rolls back all of them. Concurrent writers are serialized. Profits never
+offset the loss counter or clear a latch. Restarting preserves latches. Days have
+separate records; querying a new day never erases the previous day's breaker.
+Late records affect their supplied exchange trading day, not their ingestion day.
+The ledger does not determine or verify exchange session dates itself.
+
+`daily_summary(day)` returns net realized P&L, cumulative realized loss, latch
+status, and closed-trade count. `events()` exposes ordered close/trigger history.
+These are ledger summaries, **not evidence of completed broker reconciliation**;
+an empty ledger means no imported records, not proof that the account has no losses.
+
+**Not connected to trading authorization yet.** This version accounts only for
+fully closed positions. A fill reconciler must handle partial-close realized P&L
+on the actual realization day, allocations across spread legs, assignment,
+exercise, expiry, corrections, and missing history before any use in `RiskState`.
+Do not defer partial realized losses until the final close in a trading system.
+Open positions, pending orders, settled cash, and history-completeness checks are
+still absent. No import CLI is exposed to accept scanner-supplied accounting.
+
 ## Remaining milestones / execution prerequisites
 
 1. Extend the read-only paper client into an executor in a separate
@@ -137,7 +177,8 @@ not these read-only support/reconciliation requests.
    options permissions and whether the broker actually supports the intended cash
    account behavior. Do not assume a paper account models settled cash correctly.
 2. Trusted account, fills, contract metadata, fee estimates, and settlement
-   reconciliation, with persistent P&L and circuit-breaker latch. Broker-backed
+   reconciliation, integrating the ledger's persistent P&L and circuit-breaker
+   latch with verified complete history and partial-realization accounting. Broker-backed
    market/account data must go through the executor; scanner has no broker keys.
 3. Transactional decision IDs, single-use authorization, position/cash/rate
    reservations, and kill-switch/risk revalidation immediately before submission.
@@ -154,7 +195,7 @@ not these read-only support/reconciliation requests.
    management or enforce holding duration on broker positions.** Overnight gaps
    can cross stops. Spread assignment can create stock/cash obligations; do not
    enable spread execution without an expiration/assignment policy.
-7. Transactional audit storage, circuit-breaker transition events, notifications,
+7. Extend transactional ledger events to all order/decision events, add notifications,
    read-only dashboard, technical scanner, backtesting, then scheduled paper runs.
 8. Only after a paper track record and explicit owner approval: design a separate,
    default-off live configuration path. This repository has none.
