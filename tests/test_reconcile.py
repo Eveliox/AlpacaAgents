@@ -28,7 +28,7 @@ def account(**over):
     base = {"id": "acct-uuid", "status": "ACTIVE", "trading_blocked": False, "account_blocked": False,
             "trade_suspended_by_user": False, "pattern_day_trader": False, "options_trading_level": 2,
             "multiplier": "1", "cash": "1900.00", "non_marginable_buying_power": "1850.00",
-            "options_buying_power": "1850.00"}
+            "options_buying_power": "1850.00", "created_at": "2026-01-05T15:00:00Z"}
     return {**base, **over}
 
 
@@ -127,31 +127,30 @@ class ReconcileTests(unittest.TestCase):
             account=account(), positions=[{"asset_class": "us_option", "symbol": CONTRACT, "qty": "1"}],
             open_orders=[], clock=clock(), ledger_summary=self.ledger.daily_summary(DAY),
             inventory=self.ledger.inventory(), normalization=self.norm,
-            history_query={"after": (NOW - timedelta(days=7)).isoformat(), "until": NOW.isoformat()},
-            order_attempts=(), reserved_cash=Decimal("0"), pending_local=0, now=NOW,
+            coverage_through=NOW - timedelta(minutes=1), unsettled_proceeds=Decimal("0"),
+            live_intents=[], intent_orders={}, order_attempts=(), now=NOW,
         )
         kwargs.update(over)
         return reconcile(**kwargs)
 
-    def test_matching_positions_do_not_prove_settlement_or_complete_history(self):
+    def test_fully_consistent_state_reconciles_and_passes_rules(self):
         result = self.good()
-        self.assertIn("SETTLEMENT_UNVERIFIED", result.reasons)
-        self.assertIn("HISTORY_COVERAGE_AND_FEES_UNVERIFIED", result.reasons)
-        self.assertIn("ORDER_PROVENANCE_UNVERIFIED", result.reasons)
-        self.assertFalse(result.state.reconciled)
+        self.assertEqual(result.reasons, ())
+        self.assertTrue(result.state.reconciled)
         self.assertEqual(result.state.trading_day, DAY)
         self.assertEqual(result.state.open_positions, 1)
-        self.assertEqual(result.state.settled_cash, Decimal("0"))
-        self.assertEqual(result.details["broker_cash_fields_min"], "1850.00")
+        self.assertEqual(result.state.settled_cash, Decimal("1850.00"))   # min of cash-like fields, nothing unsettled
         idea = json.loads((Path(__file__).parent.parent / "examples/long_call.json").read_text())
         idea["symbol"] = "SPY"
         for leg in idea["legs"]:
             leg["symbol"] = "SPY"
         decision = evaluate(idea, result.state, now=NOW, trading_day=DAY, kill_switch=False)
-        self.assertFalse(decision["approved"])
-        self.assertTrue(decision["reason"].startswith("STATE_UNAVAILABLE"))
+        self.assertTrue(decision["approved"], decision["reason"])
 
     def test_every_failure_mode_yields_unreconciled_with_reason(self):
+        ours = "paper-" + "a" * 32
+        claimed = [{"authorization_id": "a" * 32, "client_order_id": ours, "symbol": "SPY", "cost": "91",
+                    "status": "claimed", "created_at": NOW.isoformat()}]
         cases = {
             "ACCOUNT_STATUS": dict(account=account(status="SUBMITTED")),
             "trading_blocked": dict(account=account(trading_blocked=True)),
@@ -159,16 +158,23 @@ class ReconcileTests(unittest.TestCase):
             "OPTIONS_LEVEL": dict(account=account(options_trading_level=1)),
             "NOT_CASH_ACCOUNT": dict(account=account(multiplier="4")),
             "ACCOUNT_FIELDS_INVALID": dict(account=account(cash="NaN")),
-            "NEGATIVE_AVAILABLE_CASH": dict(reserved_cash=Decimal("5000")),
+            "HISTORY_COVERAGE_UNANCHORED": dict(account={k: v for k, v in account().items() if k != "created_at"}),
             "POSITION_MISMATCH": dict(positions=[]),
             "SHORT_OR_FRACTIONAL_POSITION": dict(positions=[{"asset_class": "us_option", "symbol": CONTRACT, "qty": "-1"}]),
             "NON_OPTION_POSITION": dict(positions=[{"asset_class": "us_equity", "symbol": "IWM", "qty": "100"}]),
             "UNSUPPORTED_MULTILEG_OPEN_ORDER": dict(open_orders=[{"asset_class": "us_option", "side": "buy", "legs": [{}, {}]}]),
             "NON_OPTION_OPEN_ORDER": dict(open_orders=[{"asset_class": "us_equity", "side": "buy"}]),
+            "UNKNOWN_OPEN_ORDER": dict(open_orders=[{"asset_class": "us_option", "side": "buy", "client_order_id": "someone-else"}]),
+            "CLAIMED_INTENT_WITHOUT_BROKER_RECORD": dict(live_intents=claimed, intent_orders={ours: None}),
+            "OPEN_ORDER_NOT_LISTED": dict(live_intents=claimed, intent_orders={ours: {"status": "new"}}),
+            "INTENT_UNRESOLVED": dict(live_intents=claimed, intent_orders={ours: {"status": "filled"}}),
             "HISTORY_INCOMPLETE": dict(normalization=None),
-            "HISTORY_STALE": dict(history_query={"until": (NOW - timedelta(hours=1)).isoformat()}),
-            "HISTORY_WINDOW_UNKNOWN": dict(history_query=None),
+            "HISTORY_STALE": dict(coverage_through=NOW - timedelta(hours=1)),
+            "HISTORY_FROM_FUTURE": dict(coverage_through=NOW + timedelta(seconds=1)),
+            "HISTORY_COVERAGE_GAP": dict(coverage_through=None),
+            "UNSETTLED_PROCEEDS_INVALID": dict(unsettled_proceeds=Decimal("-1")),
             "BROKER_CLOCK_SKEW": dict(clock=clock(stamp=NOW - timedelta(minutes=5))),
+            "MARKET_CLOSED": dict(clock=clock(is_open=False)),
             "CLOCK_UNAVAILABLE": dict(clock={}),
             "LEDGER_DAY_MISMATCH": dict(ledger_summary=self.ledger.daily_summary(DAY - timedelta(days=1))),
         }
@@ -180,38 +186,48 @@ class ReconcileTests(unittest.TestCase):
                 decision = evaluate({}, result.state, now=NOW, trading_day=DAY, kill_switch=False)
                 self.assertEqual(decision["reason"].split(":")[0], "STATE_UNAVAILABLE")
 
-    def test_margin_override_is_not_available(self):
+    def test_margin_override_does_not_exist(self):
         self.assertFalse(self.good(account=account(multiplier="4")).state.reconciled)
         with self.assertRaises(TypeError):
             ReconcileConfig(allow_margin_paper=True)
 
-    def test_pending_entries_are_conservative_until_identity_matching(self):
-        result = self.good(open_orders=[{"asset_class": "us_option", "side": "buy"}], pending_local=0)
+    def test_matched_open_order_counts_as_pending_and_reconciles(self):
+        ours = "paper-" + "b" * 32
+        claimed = [{"authorization_id": "b" * 32, "client_order_id": ours, "symbol": "SPY", "cost": "91",
+                    "status": "claimed", "created_at": NOW.isoformat()}]
+        order = {"asset_class": "us_option", "side": "buy", "client_order_id": ours, "status": "new"}
+        result = self.good(open_orders=[order], live_intents=claimed, intent_orders={ours: order})
+        self.assertEqual(result.reasons, ())
         self.assertEqual(result.state.pending_entries, 1)
-        self.assertEqual(self.good(pending_local=2).state.pending_entries, 2)
-        sells = self.good(open_orders=[{"asset_class": "us_option", "side": "sell"}])
-        self.assertEqual(sells.state.pending_entries, 0)
-        self.assertFalse(sells.state.reconciled)
-        both = self.good(open_orders=[{"asset_class": "us_option", "side": "buy"}], pending_local=1)
-        self.assertEqual(both.state.pending_entries, 2)
+        # A reserved (not yet claimed) intent is the journal's own business, not baseline pending.
+        reserved = [{**claimed[0], "status": "reserved"}]
+        self.assertEqual(self.good(live_intents=reserved).state.pending_entries, 0)
+        self.assertEqual(self.good(live_intents=reserved).details["reserved_intents"], 1)
+
+    def test_settlement_bound_reduces_cash_and_floors_at_zero(self):
+        self.assertEqual(self.good(unsettled_proceeds=Decimal("100")).state.settled_cash, Decimal("1750.00"))
+        floored = self.good(unsettled_proceeds=Decimal("5000"))
+        self.assertEqual(floored.state.settled_cash, Decimal("0"))
+        self.assertTrue(floored.state.reconciled)   # reconciled, just no spendable cash
 
     def test_breaker_and_loss_flow_through(self):
         normalize_activities([fill("s1", "sell", price="0.45", when=NOW - timedelta(minutes=30))],
                              self.ledger, account_id="acct", recorded_at=NOW)
-        result = self.good(positions=[], inventory=self.ledger.inventory(), ledger_summary=self.ledger.daily_summary(DAY))
-        self.assertFalse(result.state.reconciled)
+        result = self.good(positions=[], inventory=self.ledger.inventory(), ledger_summary=self.ledger.daily_summary(DAY),
+                           unsettled_proceeds=self.ledger.sell_proceeds_since(DAY - timedelta(days=4)))
+        self.assertTrue(result.state.reconciled)
         self.assertEqual(result.state.daily_realized_loss, Decimal("45"))
+        self.assertEqual(result.state.settled_cash, Decimal("1805.00"))  # 45 of today's sale proceeds unsettled
         self.assertTrue(result.state.breaker_tripped)
         decision = evaluate({}, result.state, now=NOW, trading_day=DAY, kill_switch=False)
-        self.assertEqual(decision["reason"].split(":")[0], "STATE_UNAVAILABLE")
+        self.assertEqual(decision["reason"].split(":")[0], "CIRCUIT_BREAKER")
 
     def test_next_open_cannot_roll_over_current_loss_day(self):
         pre = clock(is_open=False, stamp=datetime(2026, 9, 16, 11, 0, tzinfo=timezone.utc))
         self.assertEqual(trading_day_from_clock(pre), date(2026, 9, 16))
         pre["next_open"] = "2026-09-17T09:30:00-04:00"
         self.assertEqual(trading_day_from_clock(pre), date(2026, 9, 16))
-        closed = clock(is_open=False, stamp=NOW)
-        result = self.good(clock=closed)
+        result = self.good(clock=clock(is_open=False, stamp=NOW))
         self.assertEqual(result.state.trading_day, DAY)
         self.assertIn("MARKET_CLOSED", result.reasons)
 
@@ -249,8 +265,9 @@ class BuildRiskStateTests(unittest.TestCase):
             })
             client = PaperClient(Credentials("k", "s"), TraceStore(Path(tmp) / "t.sqlite3"), opener=opener)
             result = build_risk_state(client, ledger, store, now=NOW)
-            self.assertIn("SETTLEMENT_UNVERIFIED", result.reasons)
-            self.assertFalse(result.state.reconciled)
+            self.assertEqual(result.reasons, ())
+            self.assertTrue(result.state.reconciled)
+            self.assertEqual(result.state.settled_cash, Decimal("1850.00"))
             self.assertEqual(ledger.inventory()[0]["contract"], CONTRACT)
             self.assertTrue(all(c.startswith("/v2/") for c in opener.calls))
             self.assertNotIn("/v2/orders", [c for c in opener.calls if "status" in c])  # GET only, open filter

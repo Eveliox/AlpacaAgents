@@ -5,7 +5,7 @@ than dropping anything that cannot yet be mapped to OptionFill. Raw records are
 sensitive account data: store outside git with executor-only filesystem access.
 """
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
@@ -17,6 +17,13 @@ from .client import ActivityPage, ExecutorError, PaperClient, activity_query
 
 class HistoryError(ExecutorError):
     pass
+
+
+def _parse(value: str) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("naive timestamp")
+    return parsed.astimezone(timezone.utc)
 
 
 def _id(value) -> bool:
@@ -115,6 +122,32 @@ class ActivityStore:
             for (payload,) in db.execute("SELECT payload FROM history_pages WHERE run_id=? ORDER BY page_number", (run_id,)):
                 records.extend(json.loads(payload))
             return json.loads(row[1]), records
+
+    def covered_through(self, anchor: datetime, *, min_overlap: timedelta = timedelta(seconds=1)) -> datetime | None:
+        """Latest instant contiguously covered by exhausted runs starting at/before anchor.
+
+        Alpaca's after/until are exclusive creation-time bounds, so adjacent
+        windows must OVERLAP (by min_overlap) to be considered contiguous.
+        Returns None if no exhausted run starts at or before the anchor.
+        """
+        with self._transaction() as db:
+            rows = db.execute("SELECT query FROM history_runs WHERE status='exhausted'").fetchall()
+        windows = []
+        for (query,) in rows:
+            q = json.loads(query)
+            try:
+                windows.append((_parse(q["after"]), _parse(q["until"])))
+            except (KeyError, ValueError):
+                continue
+        windows.sort()
+        through = None
+        for after, until in windows:
+            if through is None:
+                if after <= anchor and until > anchor:
+                    through = until
+            elif after + min_overlap <= through and until > through:
+                through = until
+        return through
 
     def latest_exhausted_run(self) -> str | None:
         with self._transaction() as db:

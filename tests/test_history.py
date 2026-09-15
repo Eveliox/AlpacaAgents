@@ -168,6 +168,24 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(self.latest()["status"], "started")
         self.assertFalse(self.latest()["reconciled"])
 
+    def test_covered_through_requires_anchor_and_overlap(self):
+        created = AFTER - timedelta(days=30)
+        self.assertIsNone(self.store.covered_through(created))
+        # Run 1: [AFTER, UNTIL) does not reach back to creation -> unanchored.
+        self.run_import([[]])
+        self.assertIsNone(self.store.covered_through(created))
+        # Run 2 anchors at creation but stops before AFTER: touching, not overlapping -> gap.
+        import_activities(self.client([[]]), self.store, after=created, until=AFTER, now=NOW)
+        self.assertEqual(self.store.covered_through(created), AFTER)
+        # Run 3 overlaps run 2 by a minute and reaches UNTIL -> chain extends.
+        import_activities(self.client([[]]), self.store, after=AFTER - timedelta(minutes=1), until=UNTIL, now=NOW)
+        self.assertEqual(self.store.covered_through(created), UNTIL)
+        # A failed run never extends coverage.
+        with self.assertRaises(HistoryError):
+            import_activities(self.client([[activity("x")], [activity("x")]]), self.store,
+                              after=UNTIL - timedelta(minutes=1), until=NOW, now=NOW)
+        self.assertEqual(self.store.covered_through(created), UNTIL)
+
     def test_direct_page_token_validation_and_encoding(self):
         opener = SequenceOpener([[]])
         client = PaperClient(Credentials("key", "secret"), self.traces, opener=opener)

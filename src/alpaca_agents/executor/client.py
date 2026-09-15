@@ -165,13 +165,25 @@ class PaperClient:
     def open_orders(self) -> list:
         return self._get("/v2/orders", list, query={"status": "open", "limit": "500", "nested": "true"})
 
+    def order_by_client_id(self, client_order_id: str) -> dict | None:
+        """Order record for one of OUR client ids, or None when the broker has no such order (404)."""
+        if not re.fullmatch(r"paper-[a-f0-9]{32}", client_order_id or ""):
+            raise ExecutorError("Only journal-issued client order ids may be looked up")
+        try:
+            return self._get("/v2/orders:by_client_order_id", dict, query={"client_order_id": client_order_id})
+        except ExecutorError as exc:
+            if "status=404" in str(exc):
+                return None
+            raise
+
     def activities_page(self, *, after: datetime, until: datetime,
                         page_token: str | None = None) -> ActivityPage:
         query = activity_query(after=after, until=until, page_token=page_token)
         return self._get("/v2/account/activities", list, query=query, include_trace=True)
 
     def _get(self, path: str, expected_type, *, query=None, include_trace=False):
-        if path not in ("/v2/account", "/v2/positions", "/v2/account/activities", "/v2/clock", "/v2/orders"):
+        if path not in ("/v2/account", "/v2/positions", "/v2/account/activities", "/v2/clock", "/v2/orders",
+                        "/v2/orders:by_client_order_id"):
             raise ExecutorError("Endpoint not permitted by read-only paper client")
         if path == "/v2/orders" and (query or {}).get("status") != "open":
             raise ExecutorError("Only open-order listing is permitted")

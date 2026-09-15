@@ -195,6 +195,37 @@ class OrderJournal:
                         {"authorization_id": authorization_id, **result})
         return result
 
+    def live_intents(self) -> list[dict]:
+        """Reserved and claimed intents (both still hold cash/slot reservations)."""
+        with self._transaction() as db:
+            rows = db.execute("""SELECT authorization_id, client_order_id, symbol, cost, status, created_at
+                                 FROM order_intents WHERE status IN ('reserved','claimed') ORDER BY created_at""").fetchall()
+        return [dict(r) for r in rows]
+
+    TERMINAL = frozenset({"filled", "canceled", "expired", "rejected", "replaced", "done_for_day"})
+
+    def resolve(self, authorization_id: str, *, broker_status: str, broker_order_id: str, now: datetime) -> bool:
+        """claimed -> resolved:<status>, only from a broker-observed terminal status.
+
+        This is the ONLY way a claimed reservation releases its slot. It must be
+        driven by a broker order record matched on client_order_id, never by a
+        timeout, a caller assertion, or the absence of a record.
+        """
+        _identifier(authorization_id)
+        _identifier(broker_order_id)
+        if broker_status not in self.TERMINAL:
+            raise ValueError("Only terminal broker statuses can resolve an intent")
+        stamp = _stamp(now)
+        with self._transaction() as db:
+            row = db.execute("SELECT status FROM order_intents WHERE authorization_id=?", (authorization_id,)).fetchone()
+            if row is None or row["status"] != "claimed":
+                return False
+            db.execute("UPDATE order_intents SET status=?,reason=? WHERE authorization_id=?",
+                       (f"resolved:{broker_status}", f"BROKER_STATUS: {broker_status}", authorization_id))
+            self._event(db, stamp, "intent_resolved", {"authorization_id": authorization_id,
+                                                      "broker_status": broker_status, "broker_order_id": broker_order_id})
+        return True
+
     def events(self, limit=100) -> list[dict]:
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("Event limit must be 1..1000")

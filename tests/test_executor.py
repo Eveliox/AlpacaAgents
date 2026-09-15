@@ -112,6 +112,19 @@ class ExecutorTests(unittest.TestCase):
             client._get("/v2/orders", list)
         self.assertEqual(len(self.opener.calls), 1)
 
+    def test_order_lookup_by_client_id_404_is_none_and_ids_are_validated(self):
+        cid = "paper-" + "c" * 32
+        missing = HTTPError(PAPER_URL, 404, "not found", {"X-Request-ID": "r404"}, BytesIO(b'{}'))
+        self.assertIsNone(self.client(missing).order_by_client_id(cid))
+        self.assertEqual(self.latest()["status"], 404)
+        found = self.client(Response(b'{"status":"filled","client_order_id":"x"}'))
+        self.assertEqual(found.order_by_client_id(cid)["status"], "filled")
+        self.assertIn("client_order_id=" + cid, self.opener.calls[0][0].full_url)
+        with self.assertRaises(ExecutorError):
+            found.order_by_client_id("someone-elses-id")
+        with self.assertRaises(ExecutorError):
+            self.client(Response(b'[]')).order_by_client_id(cid)   # 500 etc. still raise
+
     def test_journal_failure_prevents_access_or_success(self):
         client = self.client(Response())
         with patch.object(self.store, "begin", side_effect=OSError("disk full")):

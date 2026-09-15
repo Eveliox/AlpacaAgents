@@ -1,17 +1,24 @@
-"""Broker + ledger diagnostics. Authorization remains blocked pending evidence.
+"""Broker + ledger + journal -> RiskState. reconciled=True only when every check passes.
 
 Pure `reconcile()` takes already-fetched data so it is fully testable; the
 `build_risk_state()` wrapper does the read-only I/O. Every failed check is a
 reason string; the rules engine rejects unreconciled state unconditionally.
+
+The four verifications that used to be hard-blocked are now real checks:
+- provenance: broker open orders <-> journal intents matched on client_order_id
+- coverage:   contiguous exhausted import windows from account creation to now
+- settlement: conservative unsettled-proceeds bound computed from the ledger
+- cash acct:  multiplier == "1", no override
 """
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-import re
 
 from alpaca_agents.rules import RiskState
 from .eastern import eastern_date
 from .normalize import NormalizeResult, OCC, normalize_activities
+
+CLIENT_ID_PREFIX = "paper-"
 
 
 @dataclass(frozen=True)
@@ -19,6 +26,7 @@ class ReconcileConfig:
     min_options_level: int = 2             # long calls/puts. Spreads typically need 3.
     history_lag_limit: timedelta = timedelta(minutes=15)
     clock_skew_limit: timedelta = timedelta(seconds=60)
+    unsettled_calendar_days: int = 4       # T+1 plus weekend/holiday slack; deliberately over-conservative
 
 
 @dataclass(frozen=True)
@@ -45,11 +53,7 @@ def _when(value) -> datetime:
 
 
 def trading_day_from_clock(clock: dict) -> date:
-    """Current Eastern date; next_open must never reset today's loss latch early.
-
-    This is a calendar date, not a verified exchange session. Closed markets are
-    blocked separately until session-calendar integration exists.
-    """
+    """Current Eastern date. Never next_open: rolling forward early would reset the loss latch."""
     stamp = _when(clock["timestamp"])
     if type(clock.get("is_open")) is not bool:
         raise ValueError
@@ -57,21 +61,19 @@ def trading_day_from_clock(clock: dict) -> date:
 
 
 def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict, ledger_summary: dict,
-              inventory: list, normalization: NormalizeResult | None, history_query: dict | None,
-              order_attempts: tuple, reserved_cash: Decimal, pending_local: int, now: datetime,
-              config: ReconcileConfig = ReconcileConfig()) -> Reconciliation:
-    # Matching current positions cannot prove that fully closed losing trades,
-    # late fees, external orders or unsettled proceeds are all accounted for.
-    # No caller-supplied override can clear these unfinished prerequisites.
-    reasons = ["SETTLEMENT_UNVERIFIED", "HISTORY_COVERAGE_AND_FEES_UNVERIFIED",
-               "ORDER_PROVENANCE_UNVERIFIED", "CASH_ACCOUNT_ELIGIBILITY_UNVERIFIED"]
-    details = {}
+              inventory: list, normalization: NormalizeResult | None, coverage_through: datetime | None,
+              unsettled_proceeds: Decimal, live_intents: list, intent_orders: dict,
+              order_attempts: tuple, now: datetime, config: ReconcileConfig = ReconcileConfig()) -> Reconciliation:
+    """
+    live_intents:  journal rows with status reserved|claimed (authorization_id, client_order_id, status, cost)
+    intent_orders: {client_order_id: broker order dict | None} for every CLAIMED intent
+    """
+    reasons, details = [], {}
     if not isinstance(now, datetime) or now.tzinfo is None:
         raise ValueError("aware now required")
     now = now.astimezone(timezone.utc)
 
     # --- clock / trading day -------------------------------------------------
-    trading_day = None
     try:
         skew = abs(now - _when(clock["timestamp"]))
         if skew > config.clock_skew_limit:
@@ -82,10 +84,11 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
             reasons.append("MARKET_CLOSED")
     except (KeyError, ValueError, TypeError):
         reasons.append("CLOCK_UNAVAILABLE: cannot determine exchange trading day")
-        trading_day = eastern_date(now)   # placeholder only; state is unreconciled anyway
+        trading_day = eastern_date(now)
     details["trading_day"] = trading_day.isoformat()
 
     # --- account -------------------------------------------------------------
+    broker_cash = Decimal(0)
     try:
         if account.get("status") != "ACTIVE":
             reasons.append(f"ACCOUNT_STATUS: {account.get('status')}")
@@ -102,21 +105,15 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
         details["multiplier"] = multiplier
         if multiplier != "1":
             reasons.append(f"NOT_CASH_ACCOUNT: multiplier={multiplier}")
-        candidates = []
-        for key in ("cash", "non_marginable_buying_power", "options_buying_power"):
-            if key in account:
-                candidates.append(_dec(account[key]))
+        candidates = [_dec(account[k]) for k in ("cash", "non_marginable_buying_power", "options_buying_power") if k in account]
         if not candidates or "cash" not in account:
             raise ValueError
-        settled = min(candidates) - _dec(reserved_cash)
-        details["broker_cash_fields_min"] = str(min(candidates))
-        details["reserved_cash"] = str(reserved_cash)
-        if settled < 0:
-            reasons.append("NEGATIVE_AVAILABLE_CASH after reservations")
-            settled = Decimal(0)
-    except (ValueError, TypeError, InvalidOperation, AttributeError):
+        broker_cash = min(candidates)
+        details["broker_cash_fields_min"] = str(broker_cash)
+        created = _when(account["created_at"])
+    except (ValueError, TypeError, InvalidOperation, AttributeError, KeyError):
         reasons.append("ACCOUNT_FIELDS_INVALID")
-        settled = Decimal(0)
+        created = None
 
     # --- positions vs ledger -------------------------------------------------
     broker_positions = {}
@@ -142,37 +139,63 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
         reasons.append(f"POSITION_MISMATCH: broker={broker_positions} ledger={ledger_positions}")
     details["open_positions"] = broker_positions
 
-    # --- open orders ---------------------------------------------------------
-    pending_broker = 0
+    # --- order provenance: broker open orders <-> journal intents -------------
+    claimed = {i["client_order_id"]: i for i in live_intents if i["status"] == "claimed"}
+    reserved = [i for i in live_intents if i["status"] == "reserved"]
+    pending = 0
     try:
+        seen = set()
         for o in open_orders:
             if o.get("legs"):
                 raise ValueError("UNSUPPORTED_MULTILEG_OPEN_ORDER")
             if o.get("asset_class") != "us_option":
                 raise ValueError(f"NON_OPTION_OPEN_ORDER: {o.get('asset_class')}")
+            cid = o.get("client_order_id")
+            if cid not in claimed:
+                raise ValueError(f"UNKNOWN_OPEN_ORDER: client_order_id not issued by this journal")
+            if cid in seen:
+                raise ValueError("DUPLICATE_OPEN_ORDER")
+            seen.add(cid)
             if o.get("side") == "buy":
-                pending_broker += 1
+                pending += 1
             elif o.get("side") != "sell":
                 raise ValueError("UNSUPPORTED_OPEN_ORDER_SIDE")
+        for cid, intent in claimed.items():
+            record = intent_orders.get(cid)
+            if record is None:
+                # A claimed body with no broker record is an incident: it may have
+                # been sent and lost. It keeps its slot until resolved manually.
+                reasons.append(f"CLAIMED_INTENT_WITHOUT_BROKER_RECORD: {intent['authorization_id']}")
+                pending += 1
+            elif cid not in seen:
+                status = record.get("status")
+                if status in ("new", "accepted", "pending_new", "partially_filled", "held", "accepted_for_bidding"):
+                    reasons.append(f"OPEN_ORDER_NOT_LISTED: {cid}")
+                    pending += 1
+                else:
+                    # Terminal at the broker but still claimed locally: the caller
+                    # must run journal.resolve() and re-reconcile.
+                    reasons.append(f"INTENT_UNRESOLVED: {cid} broker_status={status}")
     except (ValueError, TypeError, AttributeError) as exc:
         reasons.append(str(exc) or "OPEN_ORDERS_INVALID")
     details["open_orders"] = len(open_orders)
-    # Until IDs can be matched, assume disjoint broker/local reservations.
-    pending = pending_broker + pending_local
+    details["reserved_intents"] = len(reserved)   # the journal adds these itself at reserve/claim time
 
-    # --- history / ledger completeness --------------------------------------
+    # --- history coverage ----------------------------------------------------
     if normalization is None or not normalization.complete:
         reasons.append("HISTORY_INCOMPLETE: blocked activities or no normalization run")
         if normalization is not None:
             details["blocked_activities"] = list(normalization.blocked[:20])
-    try:
-        until = _when(history_query["until"])
-        if until > now:
+    if created is None:
+        reasons.append("HISTORY_COVERAGE_UNANCHORED: account created_at unavailable")
+    elif coverage_through is None:
+        reasons.append("HISTORY_COVERAGE_GAP: no contiguous import from account creation")
+    else:
+        if coverage_through > now:
             reasons.append("HISTORY_FROM_FUTURE")
-        if now - until > config.history_lag_limit:
-            reasons.append(f"HISTORY_STALE: imported through {until.isoformat()}")
-    except (KeyError, ValueError, TypeError):
-        reasons.append("HISTORY_WINDOW_UNKNOWN")
+        elif now - coverage_through > config.history_lag_limit:
+            reasons.append(f"HISTORY_STALE: covered through {coverage_through.isoformat()}")
+        details["coverage_through"] = coverage_through.isoformat()
     if ledger_summary.get("trading_day") != trading_day:
         reasons.append("LEDGER_DAY_MISMATCH")
     daily_loss = _dec(ledger_summary.get("realized_loss", "0"))
@@ -180,33 +203,56 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
     details["daily_realized_loss"] = str(daily_loss)
     details["breaker_tripped"] = breaker
 
+    # --- settlement (conservative, ledger-derived) ---------------------------
+    try:
+        unsettled = _dec(unsettled_proceeds)
+        if unsettled < 0:
+            raise ValueError
+    except (ValueError, TypeError, InvalidOperation):
+        reasons.append("UNSETTLED_PROCEEDS_INVALID")
+        unsettled = broker_cash
+    settled = broker_cash - unsettled
+    details["unsettled_proceeds_bound"] = str(unsettled)
+    if settled < 0:
+        settled = Decimal(0)
+    details["settled_cash_bound"] = str(settled)
+
     state = RiskState(trading_day=trading_day, observed_at=now, open_positions=len(broker_positions),
-                      pending_entries=pending, daily_realized_loss=daily_loss, settled_cash=Decimal(0),
+                      pending_entries=pending, daily_realized_loss=daily_loss, settled_cash=settled,
                       order_attempts=tuple(order_attempts), breaker_tripped=breaker, reconciled=not reasons)
     return Reconciliation(state, tuple(reasons), details)
 
 
-def build_risk_state(client, ledger, store, *, now: datetime, order_attempts=(), reserved_cash=Decimal(0),
-                     pending_local=0, config: ReconcileConfig = ReconcileConfig(), import_days: int = 7) -> Reconciliation:
-    """Read-only I/O wrapper: import recent activities, normalize, fetch broker state, reconcile."""
+def build_risk_state(client, ledger, store, journal=None, *, now: datetime, order_attempts=(),
+                     config: ReconcileConfig = ReconcileConfig()) -> Reconciliation:
+    """Read-only I/O wrapper. Imports from the last covered instant (or account creation)."""
     from .history import HistoryError, import_activities
     account = client.account()
     clock = client.clock()
-    normalization, history_query = None, None
+    normalization, coverage = None, None
     try:
-        report = import_activities(client, store, after=now - timedelta(days=import_days), until=now, now=now)
-        history_query, records = store.exhausted_records(report["run_id"])
+        created = _when(account["created_at"])
+        through = store.covered_through(created)
+        # Overlap the previous window so exclusive after/until bounds cannot drop an activity.
+        after = created if through is None else max(created, through - timedelta(minutes=5))
+        report = import_activities(client, store, after=after, until=now, now=now, max_pages=1000)
+        _, records = store.exhausted_records(report["run_id"])
         normalization = normalize_activities(records, ledger, account_id=str(account.get("id")), recorded_at=now)
-    except HistoryError:
-        pass  # reflected as HISTORY_INCOMPLETE / HISTORY_WINDOW_UNKNOWN
+        coverage = store.covered_through(created)
+    except (HistoryError, KeyError, ValueError, TypeError):
+        pass  # reflected as HISTORY_* reasons
     positions = client.positions()
     open_orders = client.open_orders()
+    live = journal.live_intents() if journal is not None else []
+    intent_orders = {i["client_order_id"]: client.order_by_client_id(i["client_order_id"])
+                     for i in live if i["status"] == "claimed"}
     try:
         trading_day = trading_day_from_clock(clock)
     except (KeyError, ValueError, TypeError):
         trading_day = eastern_date(now)
+    unsettled = ledger.sell_proceeds_since(trading_day - timedelta(days=config.unsettled_calendar_days))
     return reconcile(account=account, positions=positions, open_orders=open_orders, clock=clock,
                      ledger_summary=ledger.daily_summary(trading_day), inventory=ledger.inventory(),
-                     normalization=normalization, history_query=history_query, order_attempts=order_attempts,
-                     reserved_cash=reserved_cash, pending_local=pending_local, now=now, config=config)
-
+                     normalization=normalization, coverage_through=coverage, unsettled_proceeds=unsettled,
+                     live_intents=live, intent_orders=intent_orders, order_attempts=order_attempts,
+                     now=now, config=config)

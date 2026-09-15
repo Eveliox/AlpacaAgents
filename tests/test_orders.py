@@ -220,6 +220,25 @@ class OrderJournalTests(unittest.TestCase):
         self.assertNotIn("authorization_id", result)
         self.assertIn("STATE_UNAVAILABLE", result["reason"])
 
+    def test_live_intents_and_broker_driven_resolution(self):
+        reserved = self.reserve()
+        aid = reserved["authorization_id"]
+        self.assertEqual([i["status"] for i in self.journal.live_intents()], ["reserved"])
+        # Only claimed intents can resolve; reserved ones expire instead.
+        self.assertFalse(self.journal.resolve(aid, broker_status="filled", broker_order_id="b1", now=NOW))
+        self.claim(aid)
+        live = self.journal.live_intents()
+        self.assertEqual((live[0]["status"], live[0]["client_order_id"]), ("claimed", "paper-" + aid))
+        with self.assertRaises(ValueError):
+            self.journal.resolve(aid, broker_status="new", broker_order_id="b1", now=NOW)   # not terminal
+        self.assertTrue(self.journal.resolve(aid, broker_status="filled", broker_order_id="b1", now=NOW))
+        self.assertEqual(self.journal.live_intents(), [])
+        self.assertFalse(self.journal.resolve(aid, broker_status="filled", broker_order_id="b1", now=NOW))
+        self.assertEqual(self.journal.events()[0]["event"], "intent_resolved")
+        # Slot is free again only after broker-driven resolution.
+        state = replace(self.state, open_positions=1)
+        self.assertTrue(self.reserve("next", self.other(), state=state)["approved"])
+
     def test_provider_errors_are_sanitized_and_audited(self):
         def provider(): raise RuntimeError("fake-secret")
         result = self.journal.reserve("provider-error", self.idea, state_provider=provider, now=NOW, trading_day=DAY)

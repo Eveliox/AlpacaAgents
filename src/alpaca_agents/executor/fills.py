@@ -220,6 +220,19 @@ class FillLedger:
             return [{"position_id": pid, "quantity": qty, "remaining_basis": _dollars(basis), "contract": contract}
                     for pid, qty, basis, contract in rows]
 
+    def sell_proceeds_since(self, day: date) -> Decimal:
+        """Gross sell premium booked on sessions >= day (for conservative unsettled-cash bounds)."""
+        if type(day) is not date:
+            raise LedgerError("Exchange session date required")
+        with self._transaction() as db:
+            rows = db.execute("SELECT payload FROM option_fills WHERE trading_day>=?", (day.isoformat(),)).fetchall()
+        total = 0
+        for (payload,) in rows:
+            data = json.loads(payload)
+            if data["side"] == "sell_to_close":
+                total += data["premium"]
+        return _dollars(total)
+
     def open_lifecycle(self, contract: str) -> str | None:
         """Lifecycle id currently holding this contract, if any (long-only)."""
         for row in self.inventory():
