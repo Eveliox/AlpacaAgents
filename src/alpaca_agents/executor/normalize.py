@@ -94,7 +94,11 @@ def normalize_activities(records, ledger: FillLedger, *, account_id: str, record
             if price < 0:
                 raise ValueError("NEGATIVE_PRICE")
             when = _when(record["transaction_time"])
-            lifecycle = ledger.open_lifecycle(contract)
+            # Overlapping import windows re-present booked activities. A replay
+            # must be matched to its ORIGINAL lifecycle (which may be closed by
+            # now), never re-derived from current inventory.
+            previous = ledger.recorded_execution(str(rid))
+            lifecycle = previous["position_id"] if previous else ledger.open_lifecycle(contract)
             if side == "buy":
                 position_id = lifecycle or f"{account_id}:{rid}"
                 ledger_side = "buy_to_open"

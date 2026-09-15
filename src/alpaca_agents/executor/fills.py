@@ -233,6 +233,13 @@ class FillLedger:
                 total += data["premium"]
         return _dollars(total)
 
+    def recorded_execution(self, execution_id: str) -> dict | None:
+        """Canonical payload already booked under this execution id, or None."""
+        _identifier(execution_id)
+        with self._transaction() as db:
+            row = db.execute("SELECT payload FROM option_fills WHERE execution_id=?", (execution_id,)).fetchone()
+        return None if row is None else json.loads(row[0])
+
     def open_lifecycle(self, contract: str) -> str | None:
         """Lifecycle id currently holding this contract, if any (long-only)."""
         for row in self.inventory():

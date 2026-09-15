@@ -101,6 +101,17 @@ class NormalizeTests(unittest.TestCase):
             with self.subTest(record=record.get("id")):
                 self.assertFalse(self.run_norm([record]).complete)
 
+    def test_replay_of_closing_fill_after_full_close_is_idempotent(self):
+        # Overlapping import windows re-present the sell after inventory is gone.
+        records = [fill("b1", "buy"), fill("s1", "sell", when=NOW - timedelta(minutes=30), price="0.40")]
+        self.assertTrue(self.run_norm(records).complete)
+        self.assertEqual(self.ledger.inventory(), [])
+        again = self.run_norm(records[1:])
+        self.assertTrue(again.complete, again.blocked)
+        self.assertEqual((again.applied_fills, again.replayed), (0, 1))
+        # A genuinely new sell with no inventory still blocks.
+        self.assertFalse(self.run_norm([fill("s2", "sell", when=NOW - timedelta(minutes=20))]).complete)
+
     def test_new_lifecycle_after_full_close(self):
         self.run_norm([fill("b1", "buy"), fill("s1", "sell", when=NOW - timedelta(minutes=30))])
         result = self.run_norm([fill("b2", "buy", when=NOW - timedelta(minutes=20))])

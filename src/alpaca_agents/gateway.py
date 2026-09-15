@@ -8,12 +8,21 @@ from typing import Any
 from .rules import RiskState, evaluate
 
 
-def trading_disabled(control_file: Path) -> bool:
-    """Missing/unreadable/unknown contents fail closed. Read on every evaluation."""
+CONTROL_MODES = ("ARMED_PAPER", "EXITS_ONLY", "DISABLED")
+
+
+def control_mode(control_file: Path) -> str:
+    """Exact file contents, or DISABLED for missing/unreadable/unknown. Read on every evaluation."""
     try:
-        return control_file.read_text(encoding="utf-8").strip() != "ARMED_PAPER"
+        mode = control_file.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
-        return True
+        return "DISABLED"
+    return mode if mode in CONTROL_MODES else "DISABLED"
+
+
+def trading_disabled(control_file: Path) -> bool:
+    """Entries require ARMED_PAPER exactly. EXITS_ONLY still disables new entries."""
+    return control_mode(control_file) != "ARMED_PAPER"
 
 
 def _append_events(path: Path, events: list[dict]) -> None:

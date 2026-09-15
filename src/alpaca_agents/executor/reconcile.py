@@ -65,8 +65,11 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
               unsettled_proceeds: Decimal, live_intents: list, intent_orders: dict,
               order_attempts: tuple, now: datetime, config: ReconcileConfig = ReconcileConfig()) -> Reconciliation:
     """
-    live_intents:  journal rows with status reserved|claimed (authorization_id, client_order_id, status, cost)
+    live_intents:  journal rows with status reserved|claimed (authorization_id, client_order_id, status, kind)
     intent_orders: {client_order_id: broker order dict | None} for every CLAIMED intent
+
+    details["resolvable"] lists claimed intents whose broker record is terminal;
+    the controller must journal.resolve() them and reconcile again.
     """
     reasons, details = [], {}
     if not isinstance(now, datetime) or now.tzinfo is None:
@@ -142,7 +145,7 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
     # --- order provenance: broker open orders <-> journal intents -------------
     claimed = {i["client_order_id"]: i for i in live_intents if i["status"] == "claimed"}
     reserved = [i for i in live_intents if i["status"] == "reserved"]
-    pending = 0
+    pending, resolvable = 0, []
     try:
         seen = set()
         for o in open_orders:
@@ -176,9 +179,12 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
                     # Terminal at the broker but still claimed locally: the caller
                     # must run journal.resolve() and re-reconcile.
                     reasons.append(f"INTENT_UNRESOLVED: {cid} broker_status={status}")
+                    resolvable.append({"authorization_id": intent["authorization_id"], "broker_status": status,
+                                       "broker_order_id": record.get("id")})
     except (ValueError, TypeError, AttributeError) as exc:
         reasons.append(str(exc) or "OPEN_ORDERS_INVALID")
     details["open_orders"] = len(open_orders)
+    details["resolvable"] = resolvable
     details["reserved_intents"] = len(reserved)   # the journal adds these itself at reserve/claim time
 
     # --- history coverage ----------------------------------------------------
@@ -224,8 +230,12 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
 
 
 def build_risk_state(client, ledger, store, journal=None, *, now: datetime, order_attempts=(),
-                     config: ReconcileConfig = ReconcileConfig()) -> Reconciliation:
-    """Read-only I/O wrapper. Imports from the last covered instant (or account creation)."""
+                     live_intents: list | None = None, config: ReconcileConfig = ReconcileConfig()) -> Reconciliation:
+    """Read-only I/O wrapper. Imports from the last covered instant (or account creation).
+
+    Pass live_intents (and journal=None) when calling from inside the journal's
+    own transaction; opening the journal again there would deadlock.
+    """
     from .history import HistoryError, import_activities
     account = client.account()
     clock = client.clock()
@@ -243,7 +253,10 @@ def build_risk_state(client, ledger, store, journal=None, *, now: datetime, orde
         pass  # reflected as HISTORY_* reasons
     positions = client.positions()
     open_orders = client.open_orders()
-    live = journal.live_intents() if journal is not None else []
+    if live_intents is not None:
+        live = list(live_intents)
+    else:
+        live = journal.live_intents() if journal is not None else []
     intent_orders = {i["client_order_id"]: client.order_by_client_id(i["client_order_id"])
                      for i in live if i["status"] == "claimed"}
     try:
