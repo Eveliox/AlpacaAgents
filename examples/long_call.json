@@ -1,0 +1,28 @@
+{
+  "symbol": "IWM",
+  "action": "open",
+  "holding_style": "swing",
+  "strategy": "long_call",
+  "direction": "long",
+  "entry_trigger": 200,
+  "stop": 195,
+  "target": 210,
+  "reward_risk": 2,
+  "quantity": 1,
+  "limit_debit": "0.90",
+  "est_contract_cost": "90.00",
+  "estimated_fees": "1.00",
+  "score": 80,
+  "thesis": "Synthetic fixture only; not a trade recommendation",
+  "legs": [
+    {
+      "symbol": "IWM",
+      "expiration": "2026-10-16",
+      "strike": 205,
+      "right": "call",
+      "side": "buy",
+      "ratio": 1,
+      "multiplier": 100
+    }
+  ]
+}
