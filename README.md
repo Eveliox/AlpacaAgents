@@ -2,18 +2,18 @@
 
 Paper-only options swing-trading system, built safety-first.
 
-**Status: milestone 1 complete; milestone 2 in progress — read-only paper client,
-persistent accounting foundations, raw activity staging, and a Layer 1 scanner
-with a Polygon/Massive market-data adapter, shadow-only CLI, an
-underlying-level backtest replay, broker-reconciliation diagnostics, and an
-offline single-use order-intent journal. Reconciliation now verifies order
-provenance, contiguous history coverage from account creation, a ledger-derived
-settlement bound, and cash-account multiplier; none has an override.**
-No order submission, live configuration, scheduler, or dashboard exists yet. An `approved: true` result is a validation decision, not an executable
-authorization. Nothing in this repository places trades. Broker connectivity has
-only been tested using fake responses, not real credentials. The market-data
-adapter is also fake-transport tested; provider entitlements/connectivity have
-not been tested with a real data key.
+**Status: milestones 1-3 complete, paper only.** All four layers exist:
+Layer 1 scanner (shadow-only until a playbook is approved), Layer 2 pure rules
+engine, Layer 3 executor (reconciliation, order-intent journal, single-attempt
+paper transport, exit manager, controller cycle), and Layer 4 static dashboard
+with notifications. Every playbook starts disabled. Nothing is submitted unless
+the controller is run with `--submit` **and** the control file says
+`ARMED_PAPER` **and** the playbook has an approval marker **and** the state is
+fully reconciled. There is no live configuration path of any kind.
+
+Broker and market-data transports have only been exercised against fake
+responses in tests; nothing here has been run against real credentials yet.
+See the runbook below for the first-run sequence.
 
 ## Run tests
 
@@ -39,8 +39,10 @@ PYTHONPATH=src python -m unittest discover -s tests -v
   Missing/unreadable control files disable trading. Audit failure raises instead
   of releasing a decision. Use this boundary rather than calling the pure engine
   directly from a future controller.
-- `src/alpaca_agents/executor/`: exclusive broker boundary, read-only paper client,
-  durable SQLite request traces, and manual connectivity CLI.
+- `src/alpaca_agents/executor/`: exclusive broker boundary. `client.py` is the paper
+  transport: GET account/positions/clock/orders/activities plus exactly one write,
+  `POST /v2/orders` for a journal-prepared body. Durable SQLite request traces;
+  manual connectivity CLI.
 - `src/alpaca_agents/executor/ledger.py`: duplicate-safe closed-trade accounting,
   daily loss latches, and transactional close/breaker events.
 - `tests/test_ledger.py`: restart, replay, concurrency, rollback, and accounting tests.
@@ -63,8 +65,23 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 - `src/alpaca_agents/executor/reconcile.py`: pure `reconcile()` cross-checks
   account, positions, open orders, clock and ledger; `build_risk_state()` wraps
   the read-only I/O. `eastern.py` gives tzdata-free ET session dates.
-- `src/alpaca_agents/executor/orders.py`: offline transactional order-intent
-  reservations, single-use claims and limit-order body preparation. No HTTP.
+- `src/alpaca_agents/executor/orders.py`: transactional order-intent journal:
+  entry reserve/claim, exit preparation, stored bodies, submission bookkeeping
+  and broker-driven resolution. No HTTP.
+- `src/alpaca_agents/executor/submit.py`: the only caller of the one write
+  endpoint. Sends the journal's stored body once; maps 2xx / broker rejection /
+  unknown outcome to journal transitions.
+- `src/alpaca_agents/executor/exits.py`: pure exit rules for held long options
+  (underlying stop, premium stop, target, time stops).
+- `src/alpaca_agents/controller.py`: one cycle = reconcile -> resolve -> exits ->
+  entries -> `runtime/cycles.jsonl`. Injected providers; `--submit` gate;
+  playbook approval markers.
+- `src/alpaca_agents/notify.py`: JSONL notifications plus optional https webhook.
+- `src/alpaca_agents/dashboard.py`: static HTML dashboard from runtime files.
+- `tests/test_controller.py`: full offline lifecycle against a stateful fake
+  broker (entry -> fill -> hold -> premium stop -> exit -> loss -> breaker).
+- `tests/test_submit.py`, `tests/test_exits.py`, `tests/test_notify.py`,
+  `tests/test_dashboard.py`.
 - `tests/test_orders.py`: concurrent reserve/claim, cash/slot/rate/expiry limits,
   kill-switch rechecks, replay rejection, restart binding, atomic-audit rollback.
 - `tests/test_reconcile.py`: every failure mode -> unreconciled with a reason ->
@@ -110,26 +127,29 @@ reset the breaker. The one-unit cap remains indefinitely until manual review.
 
 ## Kill switch
 
-Pass an owner-controlled path as `control_file` to `validate_and_log()`.
-Only the exact trimmed contents `ARMED_PAPER` allow validation. Any other contents,
-missing file, or read error block it. To stop validation without a redeploy:
+`runtime/trading-control` is read on every decision. Exact trimmed contents:
+
+| contents      | entries | exits | notes                                   |
+|---------------|---------|-------|-----------------------------------------|
+| `ARMED_PAPER` | yes     | yes   | the only mode that allows new entries   |
+| `EXITS_ONLY`  | no      | yes   | wind-down: stops/targets still honoured |
+| anything else | no      | no    | missing, unreadable, typo => DISABLED   |
 
 ```sh
 mkdir -p runtime
-printf 'STOP\n' > runtime/trading-control
+printf 'DISABLED\n' > runtime/trading-control     # stop everything
+printf 'EXITS_ONLY\n' > runtime/trading-control   # no new risk, still manage positions
+printf 'ARMED_PAPER\n' > runtime/trading-control  # full paper operation
 ```
 
-Arming the standalone validator (does **not** enable an executor):
-
-```sh
-printf 'ARMED_PAPER\n' > runtime/trading-control
-```
+The journal re-reads the file before and after every state-provider call, so a
+change made while a decision is in flight still wins.
 
 Keep this path outside scanner write permissions. In production use atomic file
 replacement. A kill switch cannot undo fills or automatically cancel existing
 orders; cancellation needs a separately validated, audited executor workflow.
 
-## Read-only paper connectivity and Request IDs
+## Paper connectivity and Request IDs
 
 After installing, inject `ALPACA_PAPER_API_KEY` and `ALPACA_PAPER_API_SECRET`
 **only into the executor process environment**, using your secret manager or a
@@ -166,7 +186,7 @@ without completion means an unresolved attempt, not confirmed broker failure.
 The journal currently retains all records; `traces` shows the latest 20. Restrict
 filesystem access and back up this file. A future retention policy must preserve
 unresolved attempts and incident records. Trade/decision/client-order correlation
-will be added with order authorization; no such IDs exist in this read-only flow.
+are the journal's `paper-<authorization_id>` values; the executor CLI itself never submits.
 
 `account()` and `positions()` return broker data only; they do not produce a
 reconciled `RiskState`. In particular, cash and options buying power do not prove
@@ -316,57 +336,126 @@ fee credits and unknown types block reconciliation until handled explicitly.
 A reconciled state is a 60-second snapshot and **authorizes nothing by itself**;
 it is the baseline the order journal validates against.
 
-## Order-intent journal (offline; no HTTP, no submission)
+## Order-intent journal and submission
 
 `OrderJournal(path, account_id=..., control_file=...)` is the executor-owned
-bridge between a rules decision and a future paper order. It is deliberately
-**not connected to any HTTP client**: `claim()` returns a prepared order body
-with `submission_enabled: False`, and there is no code path that sends it.
+bridge between a decision and a paper order. It never talks HTTP itself.
 
 ```
 reserve(decision_key, idea, state_provider, now, trading_day)
     -> {"approved", "reason", "idea", ["authorization_id", "expires_at"]}
 claim(authorization_id, state_provider, now, trading_day)
-    -> {"approved", "reason", "idea", ["prepared_order", "submission_enabled": False]}
+    -> {"approved", "reason", "idea", ["authorization_id", "prepared_order", "submission_enabled": False]}
+prepare_exit(decision_key, exit_decision, inventory, now, trading_day)
+    -> {"approved", "reason", "idea", ["authorization_id", "prepared_order"]}
 ```
 
-- `state_provider` is a callable supplied by the trusted controller that returns
-  the *baseline* `RiskState` (excluding this journal's own reservations). The
-  scanner's only input is the unvalidated idea. Inside one `BEGIN IMMEDIATE`
-  transaction the journal adds every live reservation to `pending_entries`,
-  subtracts reserved cost from `settled_cash`, appends prior authorized
-  attempts to `order_attempts`, and re-runs the full `rules.evaluate()`.
-  The kill-switch file is re-read before **and after** the provider call.
-- `reserve` is single-use per `decision_key`, including rejected keys: a retry
-  is a new decision through full validation. One live intent per underlying.
-  Only `long_call` / `long_put` can be reserved; spreads are rejected as
-  `UNSUPPORTED_EXECUTION_STRUCTURE` because the translator, ledger and
-  reconciler are single-leg only.
-- Reservations expire after 30s if unclaimed. `claim` reloads the **stored**
-  idea (a mutated scanner object cannot change the body), revalidates against
-  everything except its own reservation, checks the trading day and clock, and
-  flips `reserved -> claimed` atomically **before** the body is returned.
-  A concurrent second claim gets `AUTHORIZATION_UNAVAILABLE`.
-- A `claimed` reservation **never auto-expires**. Once a body has been handed
-  out, a crash or send timeout could mean a live broker order; only a future
-  reconciler that matches `client_order_id` (`paper-<authorization_id>`) may
-  release it. Expiry alone must never free a claimed slot.
-- Prepared body: `symbol` = OCC contract, `qty "1"`, `side buy`, `type limit`,
-  `time_in_force day`, `limit_price` = the idea's cent-quantized `limit_debit`,
-  `position_intent buy_to_open`, idempotent `client_order_id`.
-- The journal is bound to one paper account id; reopening it for another
-  account raises. Every decision, expiry, claim and rejection is an audit event
-  written in the same transaction; audit failure rolls the decision back.
+**Entries.** `state_provider` is supplied by the trusted controller and returns
+the baseline `RiskState`. Because the provider runs *inside* the journal's
+`BEGIN IMMEDIATE` transaction, it must not reopen the journal; providers that
+accept `(live_intents, now)` receive the locked view and the decision's
+timestamp. The journal adds unsent local intents to `pending_entries` (sent
+ones are already in the broker's open-order list), subtracts reserved cost for
+**all** live entries from `settled_cash` (conservative double-hold), appends
+prior authorized attempts, and re-runs the full `rules.evaluate()`. Single-use
+`decision_key`s, one live intent per underlying, `long_call`/`long_put` only,
+30s reservation expiry, `claim` reloads the stored idea and revalidates, and a
+`claimed` intent **never auto-expires**.
 
-- `live_intents()` exposes reserved/claimed intents to the reconciler.
-  `resolve(authorization_id, broker_status=..., broker_order_id=...)` is the
-  **only** transition out of `claimed`, and it accepts only a broker-observed
-  terminal status (`filled`, `canceled`, `expired`, `rejected`, ...). Never a
-  timeout, never a caller assertion, never the absence of a record.
+**Exits.** `prepare_exit` validates a deterministic decision from `exits.py`
+against ledger inventory (`NOT_HELD`, one live exit per contract, cent-priced
+positive limit, known `exit_reason`), requires `ARMED_PAPER` or `EXITS_ONLY`,
+and journals it straight to `claimed`. A sell never adds exposure, so no
+`RiskState` is consulted.
 
-`test_orders.py` drives the journal with synthetic `reconciled=True` states;
-`test_reconcile.py` proves the real reconciler produces such states only when
-every check passes.
+**Stored bodies.** At claim/prepare time the exact body is stored on the
+intent. `submit.py` sends **the stored body**, and refuses if the caller's copy
+differs (`BODY_MISMATCH`). A tampered claim result cannot change quantity,
+price or contract.
+
+**Submission (`submit_claimed(client, journal, result, now, submit=False)`).**
+Only `submit=True` from the controller sends anything. One attempt, ever:
+
+| broker outcome                              | journal transition                 | slot     |
+|---------------------------------------------|------------------------------------|----------|
+| 2xx echoing our `client_order_id`           | `mark_submitted` (stays `claimed`) | held     |
+| 400/403/422 **with** an `X-Request-ID`      | `resolve_unplaced`                 | released |
+| timeout, 5xx, no request id, echo mismatch  | `note_submit_outcome_unknown`      | held     |
+
+An unknown outcome stays `claimed` until reconciliation finds the order by
+`client_order_id`; if the broker has no record it is an incident
+(`CLAIMED_INTENT_WITHOUT_BROKER_RECORD`) that halts every cycle until a human
+resolves it. `resolve()` is the only other exit from `claimed` and accepts only
+a broker-observed terminal status.
+
+## Exit manager
+
+`exits.evaluate_exit(HeldOption, idea, trading_day)` is pure. Priority:
+
+1. `underlying_stop` - last completed session close through the idea's stop
+2. `premium_stop` - option mark x 100 <= basis x (1 - `premium_stop_pct`/100)
+3. `underlying_target` - close through the idea's target
+4. `time_stop` - DTE <= `time_stop_dte`, or weekday sessions held >= `time_stop_sessions`
+
+The exit is a **day limit sell at 95% of the mark** (floored at $0.01): a
+deliberately marketable limit for paper. Basis includes entry fees, so the
+premium stop is slightly conservative. Weekday counting is not holiday-aware,
+which only makes time stops fire earlier. Missing close => underlying rules are
+skipped; missing mark => a fired rule is reported for manual attention but no
+order is priced. The playbooks' discretionary "close back through EMA20" rules
+are **not** implemented.
+
+## Controller cycle and runbook
+
+```sh
+python -m alpaca_agents.controller                       # dry run: reconcile, evaluate, reserve, expire
+python -m alpaca_agents.controller --enable-playbook trend_directional --submit
+python -m alpaca_agents.dashboard                        # -> runtime/dashboard.html
+```
+
+One cycle:
+
+1. **Reconcile** (`build_risk_state`). Any claimed intent whose broker order is
+   terminal is `resolve()`d and the cycle reconciles again. Unreconciled =>
+   the cycle halts; nothing is evaluated (position truth is unknown).
+   Incident-class reasons notify at `incident` level.
+2. **Exits.** For every ledger lot with a journaled entry idea: fetch the
+   broker mark and the last completed session close, run `evaluate_exit`,
+   `prepare_exit`, `submit_claimed`. Under `EXITS_ONLY` this still runs.
+3. **Entries.** Only under `ARMED_PAPER`. The controller re-applies the
+   playbook gate and refuses any idea whose underlying is already held or
+   pending, regardless of what the scanner filtered (Layer 1 is untrusted).
+   Best idea by score -> `reserve` -> `claim` -> `submit_claimed`. Max one
+   entry per cycle.
+4. **Report** appended to `runtime/cycles.jsonl`; notifications to
+   `runtime/notifications.jsonl` (and `ALPACA_AGENT_WEBHOOK_URL` if set).
+
+**Dry run** (no `--submit`) reserves and lets the reservation expire; it never
+claims, because a claimed-but-unsent body would be an incident next cycle.
+Exit decisions are reported but not journaled.
+
+**Enabling a playbook** requires `runtime/playbooks/<name>.approved` containing
+exactly `APPROVED`. Create it only after reviewing that playbook's backtest
+(`python -m alpaca_agents.backtest`) and shadow-scan record. Delete the file to
+disable. `--enable-playbook` without the marker is refused and logged.
+
+**First-run sequence** (none of this has been done yet):
+
+1. `python -m alpaca_agents.executor account` - confirm `multiplier == "1"`,
+   `options_trading_level >= 2`, status `ACTIVE`. If the paper account is a
+   margin account, stop: reconciliation will never pass and there is no override.
+2. `python -m alpaca_agents.executor reconcile` - first run imports activities
+   from account creation; expect `MARKET_CLOSED` outside RTH and nothing else.
+3. `python -m alpaca_agents.scanner --session <last session>` - shadow scan;
+   review `runtime/shadow-scan.json`.
+4. `python -m alpaca_agents.controller` during RTH with `ARMED_PAPER` and no
+   playbook - proves the cycle reconciles live without submitting.
+5. Backtest, review, approve one playbook, then `--submit`. Watch the
+   dashboard and `cycles.jsonl` for the first entry, its fill, and its exit.
+
+The controller runs one cycle and exits; schedule it externally (cron / Task
+Scheduler) a few times per session. Two overlapping cycles are serialized by
+the journal lock but will each reconcile; run them sequentially.
 
 ## Raw activity-history staging (read-only)
 
@@ -585,52 +674,45 @@ checked for chunk continuity, and validated as one ascending series. Provider
 daily aggregates are split-adjusted ET-day bars; dividend adjustment and
 survivorship are not handled. Keep cached bars under `runtime/` (ignored).
 
-## Remaining milestones / execution prerequisites
+## Remaining gaps
 
-1. Extend the read-only paper client into an executor in a separate
-   credential-holding process. The URL is hardcoded to
-   `https://paper-api.alpaca.markets`; no live path until owner sign-off. Verify
-   options permissions and whether the broker actually supports the intended cash
-   account behavior. Do not assume a paper account models settled cash correctly.
-2. ~~Activity normalization, reconciliation, provenance, coverage, settlement
-   bound~~ done for long single-leg options. Still needed: spreads (multi-leg
-   positions/orders), expiration/assignment/exercise handling, and a
-   session-calendar check (the ET-date trading day is a calendar date, not a
-   verified exchange session). Broker-backed
-   market/account data must go through the executor; scanner has no broker keys.
-3. ~~Transactional decision IDs, single-use authorization, position/cash/rate
-   reservations, kill-switch/risk revalidation at claim~~ done in `orders.py`,
-   offline. Still needed: the actual `POST /v2/orders` transport (paper URL,
-   idempotent `client_order_id`, no retry), a claimed->resolved transition
-   driven by broker order status, and treating any claimed intent with no
-   broker record as an incident, not a free slot.
-4. Limit-only debit entries; spreads submitted atomically as multi-leg orders,
-   never independent legs. Verify entry trigger, quote freshness/liquidity,
-   option eligibility, contract multiplier, and fees before authorization.
-5. Idempotent client order IDs, acknowledgment/fill/partial-fill tracking, and
-   uncertain-outcome reconciliation. Never automatically resubmit a failed or
-   timed-out request. A new attempt must return through rules validation.
-6. Separate validated close/cancel flow, trusted entry dates, no same-trading-day
-   round trips, stop/target monitoring, and expiration/assignment controls.
-   **The current engine rejects all closes. It does not yet implement position
-   management or enforce holding duration on broker positions.** Overnight gaps
-   can cross stops. Spread assignment can create stock/cash obligations; do not
-   enable spread execution without an expiration/assignment policy.
-7. Verified session calendar, stock earnings, IV history and data fallbacks;
-   run the underlying-level replay on real multi-year ETF history and review it;
-   then, if obtainable, point-in-time option quotes to model premium/fees/exits
-   (the underlying replay is necessary but not sufficient); only after review,
-   enable a playbook. Extend
-   transactional ledger events to all order/decision events; notifications;
-   read-only dashboard; then scheduled paper runs. Cut any playbook showing
-   negative expectancy over 30+ triggered ideas.
-8. Only after a paper track record and explicit owner approval: design a separate,
-   default-off live configuration path. This repository has none.
+Done: paper client, ledgers, activity staging, reconciliation with real
+provenance/coverage/settlement checks, order journal, single-attempt paper
+transport, exit manager, controller, notifications, dashboard, full offline
+lifecycle test.
+
+Still open, roughly in priority order:
+
+1. **Nothing has touched a real paper account.** Run the first-run sequence
+   above and fix whatever the real API disagrees with (field names, activity
+   shapes, order echo, fee timing).
+2. **Session calendar.** The trading day is the ET calendar date and the
+   scanner's "last completed session" is the previous weekday. Holidays fail
+   closed (no ideas) but a proper exchange calendar is still needed.
+3. **Spreads.** `trend_debit_spread` and `breakout_continuation` ideas are
+   validated by the rules engine but refused by the journal
+   (`UNSUPPORTED_EXECUTION_STRUCTURE`): multi-leg orders, ledger lifecycles,
+   position matching and assignment/expiration policy do not exist.
+4. **Expiration / assignment / exercise** activities (`OPEXP`, `OPASN`,
+   `OPEXC`) block reconciliation until handled explicitly. Time stops at
+   21 DTE make this unlikely but not impossible (an unfilled exit day order).
+5. **Unfilled orders.** Entry and exit orders are day limits. An unfilled exit
+   is re-evaluated next session with a fresh decision key; there is no
+   cancel/replace and no "chase" logic. An unfilled entry simply expires.
+6. **Discretionary exit rules** ("close back through EMA20") need the indicator
+   pipeline at exit time.
+7. **Options-level backtest.** The replay is underlying-level R only. Enable
+   a playbook only after reviewing it, and cut any playbook with negative
+   expectancy over 30+ triggered ideas.
+8. **Live trading**: not designed, not planned in this repository. It would
+   need a separate default-off configuration path and explicit owner approval
+   after a paper track record.
 
 Current JSONL logging is a single-process milestone-1 adapter, not concurrent
 transactional storage. Process/container permissions must enforce the architectural
-boundaries; Python modules alone are not a security sandbox. No paper orders should
-be wired up until the trusted state and execution prerequisites above are ready.
+boundaries; Python modules alone are not a security sandbox. Paper orders are wired up
+behind the `--submit` flag, the control file, playbook approval markers and full
+reconciliation; keep all four in place.
 
 Alpaca secrets belong only in the executor's environment or secret manager.
 Market-data keys belong only in the separate scanner's environment. Never put

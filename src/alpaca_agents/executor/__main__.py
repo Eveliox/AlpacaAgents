@@ -15,7 +15,7 @@ from .reconcile import build_risk_state
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Read-only Alpaca PAPER tools; cannot place orders")
+    parser = argparse.ArgumentParser(description="Alpaca PAPER diagnostics (read-only commands; submission lives in alpaca_agents.controller --submit)")
     parser.add_argument("command", choices=("account", "traces", "import-activities", "reconcile"))
     parser.add_argument("--fills-db", type=Path, default=Path("runtime/fills.sqlite3"))
     parser.add_argument("--orders-db", type=Path, default=Path("runtime/orders.sqlite3"))
