@@ -2,10 +2,11 @@
 
 Paper-only options swing-trading system, built safety-first.
 
-**Status: milestone 1 implemented — standalone rules engine and tests.** No broker
-client, credentials, order submission, live configuration, scanner, scheduler, or
-dashboard exists yet. An `approved: true` result is a validation decision, not an
-executable authorization. Nothing in this repository places trades.
+**Status: milestone 1 complete; milestone 2 started with a read-only paper client.**
+No order submission, live configuration, scanner, scheduler, or dashboard exists
+yet. An `approved: true` result is a validation decision, not an executable
+authorization. Nothing in this repository places trades. Broker connectivity has
+only been tested using fake responses, not real credentials.
 
 ## Run tests
 
@@ -31,6 +32,9 @@ PYTHONPATH=src python -m unittest discover -s tests -v
   Missing/unreadable control files disable trading. Audit failure raises instead
   of releasing a decision. Use this boundary rather than calling the pure engine
   directly from a future controller.
+- `src/alpaca_agents/executor/`: exclusive broker boundary, read-only paper client,
+  durable SQLite request traces, and manual connectivity CLI.
+- `tests/test_executor.py`: fake-transport tests; no network or real credentials.
 - `examples/long_call.json`: synthetic input, not a current quote or recommendation.
 - `tests/test_rules.py`: rejection, boundary, spread, state, kill-switch, and audit tests.
 
@@ -81,9 +85,54 @@ Keep this path outside scanner write permissions. In production use atomic file
 replacement. A kill switch cannot undo fills or automatically cancel existing
 orders; cancellation needs a separately validated, audited executor workflow.
 
+## Read-only paper connectivity and Request IDs
+
+After installing, inject `ALPACA_PAPER_API_KEY` and `ALPACA_PAPER_API_SECRET`
+**only into the executor process environment**, using your secret manager or a
+secure shell prompt. Do not paste secrets into commands, source files, or chat.
+Generic/live credential environment names are deliberately ignored; there is no
+URL override. `.env` files are not loaded automatically.
+
+Manually run a read-only request (this contacts Alpaca when credentials are set):
+
+```sh
+python -m alpaca_agents.executor account
+```
+
+Inspect recent support traces without credentials or network access:
+
+```sh
+python -m alpaca_agents.executor traces
+```
+
+Default journal: `runtime/api-requests.sqlite3`; override with `--trace-db PATH`.
+It records UTC start/end timestamps, local correlation ID, method, endpoint path,
+HTTP status, `X-Request-ID`, and outcome. Include the broker Request ID in support
+requests; it cannot be fetched later from another endpoint. Header lookup is
+case-insensitive. Missing, malformed, or unavailable IDs are stored as null.
+IDs are captured before reading bodies, including HTTP errors (403/429/5xx).
+
+No request/response bodies, credential headers, or raw exception messages are
+journaled. No retries or redirects are followed. Environment proxy settings are
+ignored to avoid unexpectedly forwarding credentials. TLS verification remains
+on. A journal start is committed before network access; failure prevents access.
+Completion-persistence failure prevents a successful return. A `started` record
+without completion means an unresolved attempt, not confirmed broker failure.
+
+The journal currently retains all records; `traces` shows the latest 20. Restrict
+filesystem access and back up this file. A future retention policy must preserve
+unresolved attempts and incident records. Trade/decision/client-order correlation
+will be added with order authorization; no such IDs exist in this read-only flow.
+
+`account()` and `positions()` return broker data only; they do not produce a
+reconciled `RiskState`. In particular, cash and options buying power do not prove
+settled cash or cash-account eligibility. The kill switch blocks trade validation,
+not these read-only support/reconciliation requests.
+
 ## Remaining milestones / execution prerequisites
 
-1. Paper executor in a separate credential-holding process. Hardcode
+1. Extend the read-only paper client into an executor in a separate
+   credential-holding process. The URL is hardcoded to
    `https://paper-api.alpaca.markets`; no live path until owner sign-off. Verify
    options permissions and whether the broker actually supports the intended cash
    account behavior. Do not assume a paper account models settled cash correctly.
