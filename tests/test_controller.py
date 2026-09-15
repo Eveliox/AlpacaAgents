@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from urllib.error import HTTPError
 
-from alpaca_agents.controller import CycleConfig, approved_playbooks, loop, previous_weekday, run_cycle
+from alpaca_agents.controller import CycleConfig, RuntimeLock, approved_playbooks, loop, previous_weekday, run_cycle
+from alpaca_agents.executor.client import ExecutorError
 from alpaca_agents.executor.client import Credentials, PaperClient, TraceStore
 from alpaca_agents.executor.fills import FillLedger
 from alpaca_agents.executor.history import ActivityStore
@@ -289,6 +290,18 @@ class ControllerTests(unittest.TestCase):
                     {"stages": {"reconcile": {"ok": False, "reasons": ["MARKET_CLOSED", "NOT_A_SESSION: x"]}}}]
         self.assertEqual(loop(lambda now: scripted.pop(0), every=90, log=logs.append, sleep=slept.append), 0)
         self.assertEqual(slept, [60, 90])
+
+    def test_runtime_lock_is_exclusive_and_stale_locks_refuse(self):
+        with RuntimeLock(self.root):
+            self.assertTrue((self.root / "controller.lock").exists())
+            with self.assertRaises(ExecutorError):
+                with RuntimeLock(self.root):
+                    pass
+        self.assertFalse((self.root / "controller.lock").exists())
+        (self.root / "controller.lock").write_text("stale")
+        with self.assertRaises(ExecutorError):
+            with RuntimeLock(self.root):
+                pass
 
     def test_previous_weekday(self):
         self.assertEqual(previous_weekday(date(2026, 9, 14)), date(2026, 9, 11))   # Mon -> Fri

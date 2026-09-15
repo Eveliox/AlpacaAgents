@@ -461,8 +461,10 @@ with exit 0 when the only reasons are `MARKET_CLOSED` / `NOT_A_SESSION`, or
 with exit 3 when a reason implies broken state (claimed intent without a
 broker record, unknown open order, position mismatch, account/history
 problems) so a scheduler can alert. `--dashboard` re-renders the page after
-every cycle. Start it once per session (cron / Task Scheduler); never run two
-loops against the same `runtime/`.
+every cycle. Start it once per session (cron / Task Scheduler).
+`runtime/controller.lock` makes a second controller on the same directory
+refuse to start; after a crash, delete the lock only once you have confirmed
+the old process is gone.
 
 ## Raw activity-history staging (read-only)
 

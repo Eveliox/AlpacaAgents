@@ -285,6 +285,34 @@ def loop(one, *, every: int, log, sleep=None, clock=None) -> int:
         sleep(every)
 
 
+class RuntimeLock:
+    """Exclusive lock on a runtime directory. A stale lock after a crash must be
+    removed by hand: refusing to run is the fail-closed choice."""
+
+    def __init__(self, runtime: Path):
+        self.path = runtime / "controller.lock"
+        self.fd = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            raise ExecutorError(f"Another controller holds {self.path}; remove it only if that process is gone") from None
+        os.write(self.fd, f"{os.getpid()} {datetime.now(timezone.utc).isoformat()}".encode())
+        return self
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+        return False
+
+
 def main() -> int:
     import argparse
     import sqlite3
@@ -311,41 +339,52 @@ def main() -> int:
         parser.error("--every must be at least 60 seconds")
     rt = args.runtime
     try:
-        traces = TraceStore(rt / "api-requests.sqlite3")
-        client = PaperClient(Credentials.from_environment(), traces)
-        journal = OrderJournal(rt / "orders.sqlite3", account_id=str(client.account().get("id")),
-                               control_file=rt / "trading-control")
-        notifier = Notifier.from_environment(rt / "notifications.jsonl")
-        enabled, refused = approved_playbooks(args.enable_playbook, rt / "playbooks")
-        for item in refused:
-            print(f"playbook refused: {item['playbook']}: {item['reason']}", file=sys.stderr)
-        now = datetime.now(timezone.utc)
-        from .executor.eastern import eastern_date
-        session = args.session or previous_weekday(eastern_date(now))
-        ideas_provider, closes_provider, bind = _live_providers(session, rt / "market-data.jsonl", args.symbols)
-        bind(enabled)
-        ledger, store = FillLedger(rt / "fills.sqlite3"), ActivityStore(rt / "activities.sqlite3")
-        config = CycleConfig(submit=args.submit, enabled_playbooks=enabled)
-
-        def one(now):
-            report = run_cycle(client=client, ledger=ledger, store=store, journal=journal, notifier=notifier,
-                               ideas_provider=ideas_provider, closes_provider=closes_provider, now=now, config=config,
-                               report_path=rt / "cycles.jsonl")
-            if args.dashboard:
-                from .dashboard import build
-                build(rt, rt / "dashboard.html", now=datetime.now(timezone.utc))
-            return report
-
-        if args.every is None:
-            report = one(now)
-            print(json.dumps(report, indent=2, default=str))
-            return 0 if report["stages"].get("reconcile", {}).get("ok") else 2
-        return loop(one, every=args.every, log=lambda m: print(m, file=sys.stderr))
+        with RuntimeLock(rt):
+            return _run(args, rt)
     except ExecutorError as exc:
         print(str(exc), file=sys.stderr)
     except (OSError, sqlite3.Error):
         print("Persistence failed; cycle stopped.", file=sys.stderr)
     return 1
+
+
+def _run(args, rt: Path) -> int:
+    import sys
+    from .executor.client import Credentials, PaperClient, TraceStore
+    from .executor.fills import FillLedger
+    from .executor.history import ActivityStore
+    from .executor.orders import OrderJournal
+    from .notify import Notifier
+    traces = TraceStore(rt / "api-requests.sqlite3")
+    client = PaperClient(Credentials.from_environment(), traces)
+    journal = OrderJournal(rt / "orders.sqlite3", account_id=str(client.account().get("id")),
+                           control_file=rt / "trading-control")
+    notifier = Notifier.from_environment(rt / "notifications.jsonl")
+    enabled, refused = approved_playbooks(args.enable_playbook, rt / "playbooks")
+    for item in refused:
+        print(f"playbook refused: {item['playbook']}: {item['reason']}", file=sys.stderr)
+    now = datetime.now(timezone.utc)
+    from .executor.eastern import eastern_date
+    session = args.session or previous_weekday(eastern_date(now))
+    ideas_provider, closes_provider, bind = _live_providers(session, rt / "market-data.jsonl", args.symbols)
+    bind(enabled)
+    ledger, store = FillLedger(rt / "fills.sqlite3"), ActivityStore(rt / "activities.sqlite3")
+    config = CycleConfig(submit=args.submit, enabled_playbooks=enabled)
+
+    def one(now):
+        report = run_cycle(client=client, ledger=ledger, store=store, journal=journal, notifier=notifier,
+                           ideas_provider=ideas_provider, closes_provider=closes_provider, now=now, config=config,
+                           report_path=rt / "cycles.jsonl")
+        if args.dashboard:
+            from .dashboard import build
+            build(rt, rt / "dashboard.html", now=datetime.now(timezone.utc))
+        return report
+
+    if args.every is None:
+        report = one(now)
+        print(json.dumps(report, indent=2, default=str))
+        return 0 if report["stages"].get("reconcile", {}).get("ok") else 2
+    return loop(one, every=args.every, log=lambda m: print(m, file=sys.stderr))
 
 
 if __name__ == "__main__":
