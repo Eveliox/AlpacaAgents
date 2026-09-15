@@ -3,7 +3,9 @@
 Paper-only options swing-trading system, built safety-first.
 
 **Status: milestone 1 complete; milestone 2 in progress — read-only paper client
-and persistent closed-trade / long-option fill accounting foundations.**
+persistent closed-trade / long-option fill accounting foundations, bounded raw
+activity-history staging, and a Layer 1 scanner implementing the v1 playbooks
+(shadow-only until each playbook is backtested and explicitly enabled).**
 No order submission, live configuration, scanner, scheduler, or dashboard exists
 yet. An `approved: true` result is a validation decision, not an executable
 authorization. Nothing in this repository places trades. Broker connectivity has
@@ -41,6 +43,15 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 - `src/alpaca_agents/executor/fills.py`: normalized long-option FIFO inventory and
   realized P&L on every closing execution, including partial closes.
 - `tests/test_fills.py`: partial realizations, FIFO, rounding, ordering, and atomicity.
+- `src/alpaca_agents/executor/history.py`: bounded, resumable-evidence staging of
+  raw broker account activities with per-page Request IDs.
+- `tests/test_history.py`: pagination, failure preservation, account scoping, and
+  malformed-page rollback tests with fake responses.
+- `src/alpaca_agents/scanner/`: Layer 1. `indicators.py` (EMA/SMA/RSI/momentum/
+  pivots), `signals.py` (playbook signal logic), `contracts.py` (DTE/delta/liquidity
+  structure selection), `scan.py` (filters, portfolio rules, Trade Idea assembly).
+- `tests/test_scanner.py`: every playbook's output is fed through the real
+  `rules.evaluate()` to prove schema compatibility.
 - `tests/test_executor.py`: fake-transport tests; no network or real credentials.
 - `examples/long_call.json`: synthetic input, not a current quote or recommendation.
 - `tests/test_rules.py`: rejection, boundary, spread, state, kill-switch, and audit tests.
@@ -214,6 +225,102 @@ ledger database per account; do not mix accounts. Shape-valid OCC symbols alone
 do not verify contract eligibility or multiplier. No `RiskState` is generated,
 no scanner accounting import is exposed, and no orders can be submitted.
 
+## Raw activity-history staging (read-only)
+
+```sh
+python -m alpaca_agents.executor import-activities \
+  --after 2026-09-01T00:00:00+00:00 --until 2026-09-15T00:00:00+00:00
+```
+
+This pages through `GET /v2/account/activities` for an explicit, timezone-aware
+window using `direction=asc`, `page_size=100`, and `page_token` = last activity ID
+(the documented Alpaca cursor). Every page is stored verbatim with its local trace
+ID and broker `X-Request-ID` before the next request. Nothing is normalized into
+`FillLedger`; fees, corrections, assignments, exercises, expirations, and unknown
+future activity types are preserved rather than dropped.
+
+The store is bound to the authenticated account identity from `GET /v2/account`;
+reusing the file for another account fails before any activity request. `--until`
+must not be in the future. Runs stop, with a failed record, on repeated cursors,
+malformed/duplicate/oversized pages, HTTP or transport failures, persistence
+errors, or the page cap (default 100 pages). Failed and interrupted runs keep
+their partial evidence but are never reported as exhausted. Re-running creates
+a new run, so changed broker records leave separate evidence.
+
+The raw activity file contains account history; keep it out of git with
+executor-only permissions. **Exhausted pagination is not reconciliation**: the
+window may miss activity created earlier/later, Alpaca filters by creation time
+rather than trade date, and no completeness/settled-cash verification exists.
+Reports therefore always carry `reconciled: false`.
+
+## Layer 1 scanner and strategy playbooks
+
+`scan(snapshots, ScanConfig(...), as_of=<last completed session>, open_symbols=...)`
+takes per-symbol `SymbolSnapshot`s (>=200 ascending daily `Bar`s, an option
+`chain` of `OptionQuote`s, `next_earnings`, optional `iv_rank`) and returns:
+
+- `proposals`: ideas from **enabled** playbooks after portfolio filtering. These
+  are what get handed to the rules engine.
+- `shadow`: every candidate idea from every playbook, enabled or not, for
+  per-playbook stats without trading them.
+- `skipped`: `{symbol, playbook, reason}` for everything not proposed. Nothing is
+  dropped silently.
+
+**All playbooks are disabled by default.** `ScanConfig.enabled_playbooks` is
+empty; a playbook only proposes once you add it after backtesting. Unknown names
+raise. Strategy 5 (credit spreads) is not implemented and cannot be enabled.
+
+Field naming: the idea's `strategy` is the *structure* the rules engine validates
+(`long_call`, `long_put`, `call_debit_spread`, `put_debit_spread`). The playbook
+tag is the separate `playbook` field (`trend_directional`, `trend_debit_spread`,
+`oversold_bounce`, `breakout_continuation`). `exit_plan` and `session` are
+informational; the rules engine ignores unknown keys.
+
+Cross-cutting filters, in order: universe allowlist (default SPY/QQQ/IWM;
+extend deliberately); one open idea per symbol (`open_symbols` must come from
+executor state); earnings date required and must fall after the chosen
+expiration (unknown => rejected); bars must end on `as_of`; option legs need
+OI >= 500, bid > 0, bid-ask <= 10% of mid, 30-45 DTE; premium + estimated fees
+<= $100 (`fee_per_contract` defaults to a deliberate $0.65 overestimate).
+
+Signals (`signals.py`), all pure functions over bars:
+
+- **trend** (Strategies 1 & 2): close > EMA20 > EMA50 with positive 20-day
+  momentum (mirrored for shorts via puts). Entry is the close on a pullback
+  within 1% of EMA20, otherwise the prior bar's high/low; skipped if price already
+  ran >1.5% past the trigger. Stop = EMA20. Target = nearest pivot high/low in
+  the trade direction over 60 sessions, or a projected 1.5R when no level exists
+  (thesis says which). Both structures are built from the same signal; the
+  spread is preferred when `iv_rank` >= 50 or unknown, the long when lower.
+  Only the higher-scoring one per symbol is proposed.
+- **oversold_bounce** (Strategy 3): close > SMA200 and (RSI14 < 35 or three down
+  closes into a rising EMA50). Long call only. Stop = 10-session low; target =
+  nearer of EMA20 or nearest pivot high.
+- **breakout** (Strategy 4): 10-session range < 5% wide, top within 3% of the
+  60-session high, close above it on > 1.5x 20-day volume, not >1.5% extended.
+  Bull call spread only. Stop = range top; target = measured move.
+
+Every signal recomputes reward:risk from its own levels and skips below 1:1; the
+rules engine recomputes it again from the JSON and does not trust either.
+
+Structures (`contracts.py`): long = delta 0.35-0.45 closest to 0.40, limit at
+the ask. Spread = buy ~0.40 / sell ~0.25 same expiry, debit = buy ask - sell bid,
+requires `width - debit >= debit` and `debit * 100 <= max_risk`.
+
+Portfolio rules (`scan.py`): highest score per symbol; index ETFs (SPY/QQQ/IWM/
+DIA) share one correlation bucket, other symbols are their own bucket; a bucket
+already held or already proposed blocks further proposals; proposals are capped
+to free slots (`max_open_positions - len(open_symbols)`).
+
+`score` is a placeholder (signal strength, capped reward:risk, liquidity pass,
+structure preference) for ranking only. Tune it with backtest evidence.
+
+**What Layer 1 does not do yet:** fetch bars/chains/earnings/IV (adapters for
+Polygon/Alpaca data/yfinance are next), backtest, or manage exits. `exit_plan`
+records the playbook's premium/time/underlying stop rules so a future position
+manager can enforce them; today nothing closes positions. The scanner never
+holds broker credentials and calls no LLM.
+
 ## Remaining milestones / execution prerequisites
 
 1. Extend the read-only paper client into an executor in a separate
@@ -221,9 +328,9 @@ no scanner accounting import is exposed, and no orders can be submitted.
    `https://paper-api.alpaca.markets`; no live path until owner sign-off. Verify
    options permissions and whether the broker actually supports the intended cash
    account behavior. Do not assume a paper account models settled cash correctly.
-2. Trusted account, fills, contract metadata, fee estimates, and settlement
-   reconciliation, integrating the ledger's persistent P&L and circuit-breaker
-   latch with verified complete history and partial-realization accounting. Broker-backed
+2. Verified activity normalization (window continuity, order/leg mapping, fee
+   matching, expirations/assignments), feeding `FillLedger`, then trusted account,
+   position and settlement reconciliation with persistent P&L and breaker latch. Broker-backed
    market/account data must go through the executor; scanner has no broker keys.
 3. Transactional decision IDs, single-use authorization, position/cash/rate
    reservations, and kill-switch/risk revalidation immediately before submission.
@@ -240,8 +347,12 @@ no scanner accounting import is exposed, and no orders can be submitted.
    management or enforce holding duration on broker positions.** Overnight gaps
    can cross stops. Spread assignment can create stock/cash obligations; do not
    enable spread execution without an expiration/assignment policy.
-7. Extend transactional ledger events to all order/decision events, add notifications,
-   read-only dashboard, technical scanner, backtesting, then scheduled paper runs.
+7. Market-data adapters feeding `SymbolSnapshot`; a bar-replay backtester over
+   `signals.py` (vectorbt/backtrader per the playbook) measuring per-playbook
+   expectancy and failed-breakout rate before enabling any playbook; extend
+   transactional ledger events to all order/decision events; notifications;
+   read-only dashboard; then scheduled paper runs. Cut any playbook showing
+   negative expectancy over 30+ triggered ideas.
 8. Only after a paper track record and explicit owner approval: design a separate,
    default-off live configuration path. This repository has none.
 

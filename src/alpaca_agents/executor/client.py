@@ -13,6 +13,7 @@ import re
 import sqlite3
 import urllib.error
 import urllib.request
+from urllib.parse import urlencode
 from uuid import uuid4
 
 PAPER_URL = "https://paper-api.alpaca.markets"
@@ -21,6 +22,35 @@ MAX_BODY_BYTES = 2 * 1024 * 1024
 
 class ExecutorError(RuntimeError):
     """Sanitized error safe to display; raw HTTP exceptions must not be logged."""
+
+    def __init__(self, message: str, *, local_id=None, request_id=None):
+        super().__init__(message)
+        self.local_id = local_id
+        self.request_id = request_id
+
+
+@dataclass(frozen=True)
+class ActivityPage:
+    records: list
+    local_id: str
+    request_id: str | None
+
+
+def activity_query(*, after: datetime, until: datetime, page_token: str | None = None) -> dict:
+    for value in (after, until):
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            raise ExecutorError("Activity bounds must be timezone-aware timestamps")
+    if after >= until:
+        raise ExecutorError("Activity after must precede until")
+    if page_token is not None and (not isinstance(page_token, str)
+            or not re.fullmatch(r"[A-Za-z0-9._:-]{1,256}", page_token)):
+        raise ExecutorError("Invalid activity pagination token")
+    query = {"after": after.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+             "until": until.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+             "direction": "asc", "page_size": "100"}
+    if page_token is not None:
+        query["page_token"] = page_token
+    return query
 
 
 @dataclass(frozen=True)
@@ -111,7 +141,7 @@ def _request_id(headers) -> str | None:
 
 
 class PaperClient:
-    """Only GET /v2/account and GET /v2/positions are exposed.
+    """Only GET account, positions, and bounded account activities are exposed.
 
     Inject opener only in tests. Default transport disables environment proxies
     and redirects and uses Python's default verified TLS context.
@@ -129,15 +159,23 @@ class PaperClient:
     def positions(self) -> list:
         return self._get("/v2/positions", list)
 
-    def _get(self, path: str, expected_type):
-        if path not in ("/v2/account", "/v2/positions"):
+    def activities_page(self, *, after: datetime, until: datetime,
+                        page_token: str | None = None) -> ActivityPage:
+        query = activity_query(after=after, until=until, page_token=page_token)
+        return self._get("/v2/account/activities", list, query=query, include_trace=True)
+
+    def _get(self, path: str, expected_type, *, query=None, include_trace=False):
+        if path not in ("/v2/account", "/v2/positions", "/v2/account/activities"):
             raise ExecutorError("Endpoint not permitted by read-only paper client")
+        if path == "/v2/account/activities" and query is None:
+            raise ExecutorError("Bounded activity query required")
+        suffix = "?" + urlencode(query) if query else ""
         local_id = self._traces.begin(path)  # Failure here prevents broker access.
         status, request_id, outcome = None, None, "transport_error"
         payload = None
         response = None
         try:
-            request = urllib.request.Request(PAPER_URL + path, method="GET", headers={
+            request = urllib.request.Request(PAPER_URL + path + suffix, method="GET", headers={
                 "APCA-API-KEY-ID": self._credentials.key,
                 "APCA-API-SECRET-KEY": self._credentials.secret,
                 "Accept": "application/json",
@@ -177,5 +215,8 @@ class PaperClient:
                 self._traces.finish(local_id, status, request_id, outcome)
         if outcome != "success":
             raise ExecutorError(f"Paper API {outcome}; status={status}; "
-                                f"request_id={request_id or 'unavailable'}; local_id={local_id}") from None
+                                f"request_id={request_id or 'unavailable'}; local_id={local_id}",
+                                local_id=local_id, request_id=request_id) from None
+        if include_trace:
+            return ActivityPage(payload, local_id, request_id)
         return payload
