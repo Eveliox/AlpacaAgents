@@ -76,6 +76,9 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 - `src/alpaca_agents/controller.py`: one cycle = reconcile -> resolve -> exits ->
   entries -> `runtime/cycles.jsonl`. Injected providers; `--submit` gate;
   playbook approval markers.
+- `src/alpaca_agents/calendar.py`: pure NYSE session calendar (holidays, previous
+  session, sessions between). Used by the reconciler (`NOT_A_SESSION`), exit
+  time stops, and the controller's default session.
 - `src/alpaca_agents/notify.py`: JSONL notifications plus optional https webhook.
 - `src/alpaca_agents/dashboard.py`: static HTML dashboard from runtime files.
 - `tests/test_controller.py`: full offline lifecycle against a stateful fake
@@ -399,8 +402,7 @@ a broker-observed terminal status.
 
 The exit is a **day limit sell at 95% of the mark** (floored at $0.01): a
 deliberately marketable limit for paper. Basis includes entry fees, so the
-premium stop is slightly conservative. Weekday counting is not holiday-aware,
-which only makes time stops fire earlier. Missing close => underlying rules are
+premium stop is slightly conservative. Session counting uses the NYSE calendar. Missing close => underlying rules are
 skipped; missing mark => a fired rule is reported for manual attention but no
 order is priced. The playbooks' discretionary "close back through EMA20" rules
 are **not** implemented.
@@ -408,8 +410,9 @@ are **not** implemented.
 ## Controller cycle and runbook
 
 ```sh
-python -m alpaca_agents.controller                       # dry run: reconcile, evaluate, reserve, expire
+python -m alpaca_agents.controller                       # one dry-run cycle: reconcile, evaluate, reserve, expire
 python -m alpaca_agents.controller --enable-playbook trend_directional --submit
+python -m alpaca_agents.controller --every 900 --dashboard --enable-playbook trend_directional --submit
 python -m alpaca_agents.dashboard                        # -> runtime/dashboard.html
 ```
 
@@ -453,9 +456,13 @@ disable. `--enable-playbook` without the marker is refused and logged.
 5. Backtest, review, approve one playbook, then `--submit`. Watch the
    dashboard and `cycles.jsonl` for the first entry, its fill, and its exit.
 
-The controller runs one cycle and exits; schedule it externally (cron / Task
-Scheduler) a few times per session. Two overlapping cycles are serialized by
-the journal lock but will each reconcile; run them sequentially.
+**Loop mode.** `--every N` (N >= 60) runs a cycle every N seconds and stops
+with exit 0 when the only reasons are `MARKET_CLOSED` / `NOT_A_SESSION`, or
+with exit 3 when a reason implies broken state (claimed intent without a
+broker record, unknown open order, position mismatch, account/history
+problems) so a scheduler can alert. `--dashboard` re-renders the page after
+every cycle. Start it once per session (cron / Task Scheduler); never run two
+loops against the same `runtime/`.
 
 ## Raw activity-history staging (read-only)
 
@@ -686,9 +693,9 @@ Still open, roughly in priority order:
 1. **Nothing has touched a real paper account.** Run the first-run sequence
    above and fix whatever the real API disagrees with (field names, activity
    shapes, order echo, fee timing).
-2. **Session calendar.** The trading day is the ET calendar date and the
-   scanner's "last completed session" is the previous weekday. Holidays fail
-   closed (no ideas) but a proper exchange calendar is still needed.
+2. **Session calendar** is rule-based (`calendar.py`: NYSE holidays incl.
+   weekend observance, Good Friday, Juneteenth). Ad-hoc closures are not
+   modelled; the broker clock's `is_open` still gates every cycle.
 3. **Spreads.** `trend_debit_spread` and `breakout_continuation` ideas are
    validated by the rules engine but refused by the journal
    (`UNSUPPORTED_EXECUTION_STRUCTURE`): multi-leg orders, ledger lifecycles,

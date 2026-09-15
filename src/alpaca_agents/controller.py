@@ -20,6 +20,7 @@ from pathlib import Path
 import re
 from uuid import uuid4
 
+from .calendar import previous_session
 from .executor.client import ExecutorError
 from .executor.exits import HeldOption, evaluate_exit
 from .executor.reconcile import build_risk_state
@@ -202,12 +203,8 @@ def run_cycle(*, client, ledger, store, journal, notifier, ideas_provider, close
 
 
 def previous_weekday(day: date) -> date:
-    """Calendar previous weekday. Not holiday-aware: on a post-holiday day the scanner
-    will find bars 'not current for session' and produce no ideas (fail closed)."""
-    d = day - timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d
+    """Most recent scheduled NYSE session before day (name kept for callers)."""
+    return previous_session(day)
 
 
 def _live_providers(session: date, audit_path: Path, universe):
@@ -258,6 +255,36 @@ def _live_providers(session: date, audit_path: Path, universe):
     return ideas_provider, closes_provider, bind
 
 
+HALT_PREFIXES = ("CLAIMED_INTENT", "UNKNOWN_OPEN_ORDER", "POSITION_MISMATCH", "ACCOUNT_", "NOT_CASH_ACCOUNT", "HISTORY_")
+
+
+def loop(one, *, every: int, log, sleep=None, clock=None) -> int:
+    """Run cycles until the market closes or an incident-class halt needs a human.
+
+    A MARKET_CLOSED-only halt ends the loop normally (exit 0). Any reason that
+    implies broken state ends it with exit 3 so a scheduler can alert. Provider
+    or transport errors already produce a halt stage inside run_cycle.
+    """
+    import time
+    sleep = sleep or time.sleep
+    clock = clock or (lambda: datetime.now(timezone.utc))
+    cycles = 0
+    while True:
+        report = one(clock())
+        cycles += 1
+        rec = report["stages"].get("reconcile", {})
+        reasons = rec.get("reasons", [])
+        summary = "reconciled" if rec.get("ok") else ("unreconciled: " + "; ".join(reasons) if reasons else rec.get("error", "failed"))
+        log(f"cycle {cycles} {report.get('finished_at', '')}: {summary}")
+        if reasons and all(r == "MARKET_CLOSED" or r.startswith("NOT_A_SESSION") for r in reasons):
+            log("market closed; loop finished")
+            return 0
+        if any(r.startswith(HALT_PREFIXES) for r in reasons) or "error" in rec:
+            log("halted: state needs a human before the next cycle")
+            return 3
+        sleep(every)
+
+
 def main() -> int:
     import argparse
     import sqlite3
@@ -276,7 +303,12 @@ def main() -> int:
     parser.add_argument("--session", type=date.fromisoformat, help="last completed session (default: previous weekday)")
     parser.add_argument("--symbols", nargs="+", choices=sorted(INDEX_ETFS), default=["SPY", "QQQ", "IWM"])
     parser.add_argument("--runtime", type=Path, default=Path("runtime"))
+    parser.add_argument("--every", type=int, metavar="SECONDS",
+                        help="loop: run a cycle every N seconds (>=60) until the market closes or an incident halts it")
+    parser.add_argument("--dashboard", action="store_true", help="re-render runtime/dashboard.html after each cycle")
     args = parser.parse_args()
+    if args.every is not None and args.every < 60:
+        parser.error("--every must be at least 60 seconds")
     rt = args.runtime
     try:
         traces = TraceStore(rt / "api-requests.sqlite3")
@@ -292,12 +324,23 @@ def main() -> int:
         session = args.session or previous_weekday(eastern_date(now))
         ideas_provider, closes_provider, bind = _live_providers(session, rt / "market-data.jsonl", args.symbols)
         bind(enabled)
-        report = run_cycle(client=client, ledger=FillLedger(rt / "fills.sqlite3"), store=ActivityStore(rt / "activities.sqlite3"),
-                           journal=journal, notifier=notifier, ideas_provider=ideas_provider, closes_provider=closes_provider,
-                           now=now, config=CycleConfig(submit=args.submit, enabled_playbooks=enabled),
-                           report_path=rt / "cycles.jsonl")
-        print(json.dumps(report, indent=2, default=str))
-        return 0 if report["stages"].get("reconcile", {}).get("ok") else 2
+        ledger, store = FillLedger(rt / "fills.sqlite3"), ActivityStore(rt / "activities.sqlite3")
+        config = CycleConfig(submit=args.submit, enabled_playbooks=enabled)
+
+        def one(now):
+            report = run_cycle(client=client, ledger=ledger, store=store, journal=journal, notifier=notifier,
+                               ideas_provider=ideas_provider, closes_provider=closes_provider, now=now, config=config,
+                               report_path=rt / "cycles.jsonl")
+            if args.dashboard:
+                from .dashboard import build
+                build(rt, rt / "dashboard.html", now=datetime.now(timezone.utc))
+            return report
+
+        if args.every is None:
+            report = one(now)
+            print(json.dumps(report, indent=2, default=str))
+            return 0 if report["stages"].get("reconcile", {}).get("ok") else 2
+        return loop(one, every=args.every, log=lambda m: print(m, file=sys.stderr))
     except ExecutorError as exc:
         print(str(exc), file=sys.stderr)
     except (OSError, sqlite3.Error):

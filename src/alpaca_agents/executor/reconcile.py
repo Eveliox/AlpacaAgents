@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
+from alpaca_agents.calendar import is_session
 from alpaca_agents.rules import RiskState
 from .eastern import eastern_date
 from .normalize import NormalizeResult, OCC, normalize_activities
@@ -85,6 +86,8 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
         details["market_open"] = clock.get("is_open")
         if clock.get("is_open") is not True:
             reasons.append("MARKET_CLOSED")
+        if not is_session(trading_day):
+            reasons.append(f"NOT_A_SESSION: {trading_day.isoformat()} is not a scheduled NYSE session")
     except (KeyError, ValueError, TypeError):
         reasons.append("CLOCK_UNAVAILABLE: cannot determine exchange trading day")
         trading_day = eastern_date(now)

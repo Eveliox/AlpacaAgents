@@ -9,7 +9,7 @@ Rules, in priority order (first hit wins):
   underlying_stop   close beyond the idea's stop against the position
   premium_stop      mark*100 <= basis * (1 - premium_stop_pct/100)
   underlying_target close beyond the idea's target in favour of the position
-  time_stop         DTE <= time_stop_dte, or sessions held >= time_stop_sessions
+  time_stop         DTE <= time_stop_dte, or NYSE sessions held >= time_stop_sessions
 
 The exit order is a DAY LIMIT sell at 95% of the mark (floored at $0.01): a
 deliberately marketable limit for paper. "Close back through EMA20" style
@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 import re
+
+from alpaca_agents.calendar import sessions_between
 
 OCC = re.compile(r"[A-Z]{1,6}[0-9]{6}[CP][0-9]{8}")
 CENT = Decimal("0.01")
@@ -45,18 +47,8 @@ def _dec(value) -> Decimal:
 
 
 def weekdays_between(start: date, end: date) -> int:
-    """Calendar-weekday count in (start, end]. Not holiday-aware: over-counts sessions, so time stops fire early."""
-    if end <= start:
-        return 0
-    days = (end - start).days
-    full, extra = divmod(days, 7)
-    count = full * 5
-    d = start
-    for _ in range(extra):
-        d = date.fromordinal(d.toordinal() + 1)
-        if d.weekday() < 5:
-            count += 1
-    return count
+    """Scheduled NYSE sessions in (start, end]. Kept under its historical name."""
+    return sessions_between(start, end)
 
 
 def contract_expiry(contract: str) -> date:

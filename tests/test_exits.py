@@ -89,7 +89,7 @@ class ExitRuleTests(unittest.TestCase):
         self.assertEqual(exit_limit(Decimal("0.01")), "0.01")
         self.assertEqual(exit_limit(Decimal("0.005")), "0.01")
         self.assertEqual(weekdays_between(date(2026, 9, 11), date(2026, 9, 14)), 1)   # Fri -> Mon
-        self.assertEqual(weekdays_between(date(2026, 9, 1), date(2026, 9, 15)), 10)
+        self.assertEqual(weekdays_between(date(2026, 9, 1), date(2026, 9, 15)), 9)   # Labor Day excluded
         self.assertEqual(weekdays_between(DAY, DAY), 0)
 
 

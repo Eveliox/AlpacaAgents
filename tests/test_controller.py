@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from urllib.error import HTTPError
 
-from alpaca_agents.controller import CycleConfig, approved_playbooks, previous_weekday, run_cycle
+from alpaca_agents.controller import CycleConfig, approved_playbooks, loop, previous_weekday, run_cycle
 from alpaca_agents.executor.client import Credentials, PaperClient, TraceStore
 from alpaca_agents.executor.fills import FillLedger
 from alpaca_agents.executor.history import ActivityStore
@@ -270,9 +270,30 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(enabled, frozenset({"trend_directional"}))
         self.assertEqual(refused[0]["playbook"], "oversold_bounce")
 
+    def test_loop_stops_on_market_close_or_incident(self):
+        scripted = [
+            {"stages": {"reconcile": {"ok": True, "reasons": []}}, "finished_at": "t1"},
+            {"stages": {"reconcile": {"ok": False, "reasons": ["MARKET_CLOSED"]}}, "finished_at": "t2"},
+        ]
+        slept, logs = [], []
+        code = loop(lambda now: scripted.pop(0), every=60, log=logs.append, sleep=slept.append)
+        self.assertEqual((code, slept), (0, [60]))
+        self.assertTrue(logs[-1].startswith("market closed"))
+        scripted = [{"stages": {"reconcile": {"ok": False, "reasons": ["CLAIMED_INTENT_WITHOUT_BROKER_RECORD: x"]}}}]
+        self.assertEqual(loop(lambda now: scripted.pop(0), every=60, log=logs.append, sleep=slept.append), 3)
+        self.assertEqual(slept, [60])
+        scripted = [{"stages": {"reconcile": {"ok": False, "error": "Paper API transport_error"}}}]
+        self.assertEqual(loop(lambda now: scripted.pop(0), every=60, log=logs.append, sleep=slept.append), 3)
+        # A transient warning (e.g. clock skew) keeps looping.
+        scripted = [{"stages": {"reconcile": {"ok": False, "reasons": ["BROKER_CLOCK_SKEW: 70s"]}}},
+                    {"stages": {"reconcile": {"ok": False, "reasons": ["MARKET_CLOSED", "NOT_A_SESSION: x"]}}}]
+        self.assertEqual(loop(lambda now: scripted.pop(0), every=90, log=logs.append, sleep=slept.append), 0)
+        self.assertEqual(slept, [60, 90])
+
     def test_previous_weekday(self):
         self.assertEqual(previous_weekday(date(2026, 9, 14)), date(2026, 9, 11))   # Mon -> Fri
         self.assertEqual(previous_weekday(date(2026, 9, 15)), date(2026, 9, 14))
+        self.assertEqual(previous_weekday(date(2026, 9, 8)), date(2026, 9, 4))    # Labor Day skipped
 
 
 if __name__ == "__main__":
