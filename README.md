@@ -4,8 +4,9 @@ Paper-only options swing-trading system, built safety-first.
 
 **Status: milestone 1 complete; milestone 2 in progress — read-only paper client,
 persistent accounting foundations, raw activity staging, and a Layer 1 scanner
-with a Polygon/Massive market-data adapter, shadow-only CLI, and an
-underlying-level backtest replay.**
+with a Polygon/Massive market-data adapter, shadow-only CLI, an
+underlying-level backtest replay, and fail-closed broker reconciliation that
+produces the rules engine's `RiskState`.**
 No order submission, live configuration, scheduler, or dashboard exists yet. An `approved: true` result is a validation decision, not an executable
 authorization. Nothing in this repository places trades. Broker connectivity has
 only been tested using fake responses, not real credentials. The market-data
@@ -55,6 +56,13 @@ PYTHONPATH=src python -m unittest discover -s tests -v
   diagnostics, and provider-to-`SymbolSnapshot` normalization.
 - `src/alpaca_agents/scanner/__main__.py`: manual ETF shadow scan and JSON report;
   there is no option to enable playbooks or place orders.
+- `src/alpaca_agents/executor/normalize.py`: Alpaca activities -> `FillLedger`
+  (FILL/FEE booked, cash movements ignored, everything else blocks).
+- `src/alpaca_agents/executor/reconcile.py`: pure `reconcile()` cross-checks
+  account, positions, open orders, clock and ledger; `build_risk_state()` wraps
+  the read-only I/O. `eastern.py` gives tzdata-free ET session dates.
+- `tests/test_reconcile.py`: every failure mode -> unreconciled with a reason ->
+  rules engine rejects; end-to-end read-only build with a scripted transport.
 - `src/alpaca_agents/backtest/`: walk-forward replay of `signals.py` over daily
   bars (`replay.py`), multi-year history stitching / JSON cache (`history.py`),
   and a report CLI. Underlying-level R only; options are not modelled.
@@ -236,6 +244,53 @@ corrections, account scoping checks, and settled-cash reconciliation. Use one
 ledger database per account; do not mix accounts. Shape-valid OCC symbols alone
 do not verify contract eligibility or multiplier. No `RiskState` is generated,
 no scanner accounting import is exposed, and no orders can be submitted.
+
+## Reconciliation: broker + ledger -> RiskState
+
+```sh
+python -m alpaca_agents.executor reconcile            # exit 0 reconciled, 2 not
+```
+
+`build_risk_state()` imports the last 7 days of activities, normalizes them into
+`FillLedger`, fetches account / positions / open orders / clock, and calls the
+pure `reconcile()`. It returns a `RiskState` plus a list of **reasons**; the
+state is `reconciled=True` only when the list is empty, and the rules engine
+rejects any unreconciled state before looking at an idea. Checks:
+
+- **Clock**: broker clock within 60s of local; trading day = ET date of the
+  current session if open, else of `next_open`. ET is derived without tzdata
+  (`eastern.py`, statutory DST rule; zoneinfo used when available).
+- **Account**: `ACTIVE`; not trading/account blocked or user-suspended; not PDT;
+  `options_trading_level >= 2`; **`multiplier == "1"` (cash)**. Alpaca paper
+  accounts often default to margin (`"4"`); that fails reconciliation until you
+  pass `--allow-margin-paper` / `ReconcileConfig(allow_margin_paper=True)` as a
+  deliberate decision. Settled cash = min(`cash`, `non_marginable_buying_power`,
+  `options_buying_power`) minus local reservations - a conservative proxy, not a
+  verified T+1 settlement model.
+- **Positions**: every broker position must be a standard long option and the
+  `{contract: qty}` map must equal the ledger's remaining lots exactly. Any
+  mismatch (missing opening history, unknown fills, shorts, equity from
+  assignment) is a reason.
+- **Open orders**: single-leg option orders only; buys count as pending entries
+  (`max(broker, local)`); multi-leg or non-option orders are reasons.
+- **History**: the activity import must have exhausted pagination through at
+  most 15 minutes ago, and normalization must have blocked nothing.
+- **Ledger day** must match the trading day; realized loss and the breaker latch
+  flow straight into `RiskState`.
+
+Normalization (`normalize.py`): `FILL` activities are sorted by
+`(transaction_time, id)` (equal timestamps from partial fills are fine), booked
+as `buy_to_open` (new lifecycle or add to the open one) or `sell_to_close` on
+the open lifecycle; a sell with no inventory blocks and **halts further fills**
+so lifecycles are never misattributed. Session date is the ET date of the
+execution. Per-execution fees are booked as 0 because Alpaca bills options
+regulatory fees as separate `FEE` activities; those are booked on their activity
+date and count **fully toward the daily loss counter** (conservative, cents).
+`CSD/CSW/JNLC/INT/DIV` are ignored. `OPEXP`, `OPASN`, `OPEXC`, equity fills,
+fee credits and unknown types block reconciliation until handled explicitly.
+
+A reconciled state is a 60-second snapshot and **authorizes nothing by itself**;
+order submission with single-use authorization is still unimplemented.
 
 ## Raw activity-history staging (read-only)
 
@@ -461,9 +516,10 @@ survivorship are not handled. Keep cached bars under `runtime/` (ignored).
    `https://paper-api.alpaca.markets`; no live path until owner sign-off. Verify
    options permissions and whether the broker actually supports the intended cash
    account behavior. Do not assume a paper account models settled cash correctly.
-2. Verified activity normalization (window continuity, order/leg mapping, fee
-   matching, expirations/assignments), feeding `FillLedger`, then trusted account,
-   position and settlement reconciliation with persistent P&L and breaker latch. Broker-backed
+2. ~~Activity normalization and reconciliation~~ done for long single-leg options.
+   Still needed: spreads (multi-leg positions/orders), expiration/assignment/
+   exercise handling, verified settlement, and a persistent order journal so
+   open orders have known provenance. Broker-backed
    market/account data must go through the executor; scanner has no broker keys.
 3. Transactional decision IDs, single-use authorization, position/cash/rate
    reservations, and kill-switch/risk revalidation immediately before submission.

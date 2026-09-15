@@ -40,7 +40,10 @@ class FillTests(unittest.TestCase):
         self.assertTrue(summary["breaker_tripped"])
         self.assertFalse(summary["reconciled"])
         self.assertEqual(restarted.inventory(), [{"position_id": "position-1", "quantity": 1,
-                                                "remaining_basis": Decimal("91")}])
+                                                "remaining_basis": Decimal("91"),
+                                                "contract": "IWM261016C00205000"}])
+        self.assertEqual(restarted.open_lifecycle("IWM261016C00205000"), "position-1")
+        self.assertIsNone(restarted.open_lifecycle("IWM261016P00205000"))
 
     def test_fifo_and_entry_exit_fees(self):
         self.record(replace(self.buy, quantity=1, premium=Decimal("80"), fees=Decimal("1")))
@@ -85,7 +88,6 @@ class FillTests(unittest.TestCase):
             replace(self.sell, quantity=3),
             replace(self.sell, contract="IWM261016P00205000"),
             replace(self.sell, occurred_at=OPEN - timedelta(seconds=1)),
-            replace(self.sell, occurred_at=OPEN),
         ):
             with self.subTest(fill=fill), self.assertRaises(LedgerError):
                 self.record(fill)
@@ -152,6 +154,27 @@ class FillTests(unittest.TestCase):
         self.assertEqual(len(self.ledger.events(limit=1)), 1)
         with self.assertRaises(LedgerError):
             self.ledger.events(limit=0)
+
+    def test_equal_timestamp_partial_fills_allowed_in_id_order(self):
+        self.record(self.buy)
+        self.record(replace(self.sell, execution_id="sell-a"))
+        self.assertTrue(self.record(replace(self.sell, execution_id="sell-b")))
+        self.assertEqual(self.ledger.inventory(), [])
+
+    def test_fees_count_toward_loss_and_latch_and_replay_safely(self):
+        self.assertTrue(self.ledger.record_fee("fee-1", trading_day=DAY, amount=Decimal("0.04"), recorded_at=CLOSE))
+        self.assertFalse(self.ledger.record_fee("fee-1", trading_day=DAY, amount=Decimal("0.040"), recorded_at=CLOSE))
+        with self.assertRaises(LedgerError):
+            self.ledger.record_fee("fee-1", trading_day=DAY, amount=Decimal("0.05"), recorded_at=CLOSE)
+        with self.assertRaises(LedgerError):
+            self.ledger.record_fee("fee-neg", trading_day=DAY, amount=Decimal("-1"), recorded_at=CLOSE)
+        summary = self.ledger.daily_summary(DAY)
+        self.assertEqual(summary["realized_loss"], Decimal("0.04"))
+        self.assertEqual(summary["realized_pnl"], Decimal("-0.04"))
+        self.record(self.buy)
+        self.record(replace(self.sell, premium=Decimal("52.04")))  # -39.96 + 0.04 fee = 40 exactly
+        self.assertTrue(self.ledger.daily_summary(DAY)["breaker_tripped"])
+        self.assertEqual(sum(e["event"] == "fee_accounted" for e in self.ledger.events()), 1)
 
     def test_sell_consumes_multiple_fifo_lots(self):
         self.record(replace(self.buy, quantity=1, premium=Decimal("80"), fees=Decimal("1")))

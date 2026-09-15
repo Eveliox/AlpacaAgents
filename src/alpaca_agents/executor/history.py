@@ -103,6 +103,24 @@ class ActivityStore:
                           error_local_id=?,error_request_id=? WHERE run_id=? AND status='started'""",
                        (datetime.now(timezone.utc).isoformat(), code, local_id, request_id, run_id))
 
+    def exhausted_records(self, run_id: str) -> tuple[dict, list]:
+        """(query, records) for a run that reached an empty terminal page; else HistoryError."""
+        with self._transaction() as db:
+            row = db.execute("SELECT status,query FROM history_runs WHERE run_id=?", (run_id,)).fetchone()
+            if row is None:
+                raise HistoryError("Unknown import run")
+            if row[0] != "exhausted":
+                raise HistoryError("Import run did not exhaust pagination; history incomplete")
+            records = []
+            for (payload,) in db.execute("SELECT payload FROM history_pages WHERE run_id=? ORDER BY page_number", (run_id,)):
+                records.extend(json.loads(payload))
+            return json.loads(row[1]), records
+
+    def latest_exhausted_run(self) -> str | None:
+        with self._transaction() as db:
+            row = db.execute("SELECT run_id FROM history_runs WHERE status='exhausted' ORDER BY started_at DESC, rowid DESC LIMIT 1").fetchone()
+            return row[0] if row else None
+
     def report(self, run_id: str) -> dict:
         with self._transaction() as db:
             row = db.execute("SELECT status,failure_code,error_local_id,error_request_id FROM history_runs WHERE run_id=?", (run_id,)).fetchone()

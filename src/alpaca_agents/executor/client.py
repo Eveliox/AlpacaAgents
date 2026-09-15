@@ -159,14 +159,22 @@ class PaperClient:
     def positions(self) -> list:
         return self._get("/v2/positions", list)
 
+    def clock(self) -> dict:
+        return self._get("/v2/clock", dict)
+
+    def open_orders(self) -> list:
+        return self._get("/v2/orders", list, query={"status": "open", "limit": "500", "nested": "true"})
+
     def activities_page(self, *, after: datetime, until: datetime,
                         page_token: str | None = None) -> ActivityPage:
         query = activity_query(after=after, until=until, page_token=page_token)
         return self._get("/v2/account/activities", list, query=query, include_trace=True)
 
     def _get(self, path: str, expected_type, *, query=None, include_trace=False):
-        if path not in ("/v2/account", "/v2/positions", "/v2/account/activities"):
+        if path not in ("/v2/account", "/v2/positions", "/v2/account/activities", "/v2/clock", "/v2/orders"):
             raise ExecutorError("Endpoint not permitted by read-only paper client")
+        if path == "/v2/orders" and (query or {}).get("status") != "open":
+            raise ExecutorError("Only open-order listing is permitted")
         if path == "/v2/account/activities" and query is None:
             raise ExecutorError("Bounded activity query required")
         suffix = "?" + urlencode(query) if query else ""

@@ -86,6 +86,8 @@ class FillLedger:
                 quantity INTEGER NOT NULL, basis_units INTEGER NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS fill_breakers (
                 trading_day TEXT PRIMARY KEY, tripped_at TEXT NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS option_fees (
+                fee_id TEXT PRIMARY KEY, trading_day TEXT NOT NULL, amount_units INTEGER NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS fill_events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL,
                 event TEXT NOT NULL, payload TEXT NOT NULL)""")
@@ -103,8 +105,37 @@ class FillLedger:
 
     @staticmethod
     def _totals(db, day: str):
+        """(net pnl, loss counter). Separately-billed fees count fully toward the loss counter."""
         pnls = [r[0] for r in db.execute("SELECT pnl_units FROM option_fills WHERE trading_day=?", (day,))]
-        return sum(pnls), sum(-p for p in pnls if p < 0)
+        fees = sum(r[0] for r in db.execute("SELECT amount_units FROM option_fees WHERE trading_day=?", (day,)))
+        return sum(pnls) - fees, sum(-p for p in pnls if p < 0) + fees
+
+    def _latch_if_needed(self, db, day: str, stamp: str) -> None:
+        _, loss = self._totals(db, day)
+        if loss >= 40 * SCALE:
+            changed = db.execute("INSERT OR IGNORE INTO fill_breakers VALUES (?,?)", (day, stamp))
+            if changed.rowcount:
+                db.execute("INSERT INTO fill_events(timestamp,event,payload) VALUES (?, 'circuit_breaker_triggered', ?)",
+                           (stamp, json.dumps({"trading_day": day, "realized_loss": str(_dollars(loss))})))
+
+    def record_fee(self, fee_id: str, *, trading_day: date, amount: Decimal, recorded_at: datetime) -> bool:
+        """Book a separately-billed fee (e.g. options regulatory fees) against a session."""
+        _identifier(fee_id)
+        if type(trading_day) is not date:
+            raise LedgerError("Exchange session date required")
+        units = _units(amount)
+        stamp = _timestamp(recorded_at)
+        with self._transaction() as db:
+            existing = db.execute("SELECT trading_day,amount_units FROM option_fees WHERE fee_id=?", (fee_id,)).fetchone()
+            if existing:
+                if existing == (trading_day.isoformat(), units):
+                    return False
+                raise LedgerError("Conflicting fee replay; reconciliation required")
+            db.execute("INSERT INTO option_fees VALUES (?,?,?)", (fee_id, trading_day.isoformat(), units))
+            db.execute("INSERT INTO fill_events(timestamp,event,payload) VALUES (?, 'fee_accounted', ?)",
+                       (stamp, json.dumps({"fee_id": fee_id, "trading_day": trading_day.isoformat(), "amount": str(_dollars(units))})))
+            self._latch_if_needed(db, trading_day.isoformat(), stamp)
+        return True
 
     def record(self, fill: OptionFill, *, recorded_at: datetime) -> bool:
         data = fill.canonical()
@@ -127,8 +158,10 @@ class FillLedger:
                 last = json.loads(previous[0])
                 if last["contract"] != fill.contract:
                     raise LedgerError("Position lifecycle contract mismatch")
-                if fill.occurred_at <= datetime.fromisoformat(last["occurred_at"]) or data["trading_day"] < last["trading_day"]:
-                    raise LedgerError("Out-of-order or ambiguous execution; verified ordering required")
+                # Equal timestamps are allowed (partial fills of one order); the
+                # importer must supply a deterministic (time, id) ordering.
+                if fill.occurred_at < datetime.fromisoformat(last["occurred_at"]) or data["trading_day"] < last["trading_day"]:
+                    raise LedgerError("Out-of-order execution; verified ordering required")
                 if available == 0:
                     raise LedgerError("Closed lifecycle cannot be reused")
             pnl = 0
@@ -156,12 +189,7 @@ class FillLedger:
             event = {**data, "realized_pnl": str(_dollars(pnl))}
             db.execute("INSERT INTO fill_events(timestamp,event,payload) VALUES (?, 'fill_accounted', ?)",
                        (stamp, json.dumps(event, sort_keys=True)))
-            _, loss = self._totals(db, data["trading_day"])
-            if loss >= 40 * SCALE:
-                changed = db.execute("INSERT OR IGNORE INTO fill_breakers VALUES (?,?)", (data["trading_day"], stamp))
-                if changed.rowcount:
-                    db.execute("INSERT INTO fill_events(timestamp,event,payload) VALUES (?, 'circuit_breaker_triggered', ?)",
-                               (stamp, json.dumps({"trading_day": data["trading_day"], "realized_loss": str(_dollars(loss))})))
+            self._latch_if_needed(db, data["trading_day"], stamp)
         return True
 
     def daily_summary(self, day: date) -> dict:
@@ -183,6 +211,18 @@ class FillLedger:
                     for seq, stamp, event, payload in rows]
 
     def inventory(self) -> list[dict]:
+        """Remaining lots aggregated per lifecycle, with the lifecycle's contract."""
         with self._transaction() as db:
-            rows = db.execute("SELECT position_id,quantity,basis_units FROM option_lots WHERE quantity>0 ORDER BY seq")
-            return [{"position_id": pid, "quantity": qty, "remaining_basis": _dollars(basis)} for pid, qty, basis in rows]
+            rows = db.execute("""SELECT l.position_id, SUM(l.quantity), SUM(l.basis_units),
+                                 (SELECT json_extract(payload,'$.contract') FROM option_fills f
+                                  WHERE f.position_id = l.position_id ORDER BY seq LIMIT 1)
+                                 FROM option_lots l WHERE l.quantity > 0 GROUP BY l.position_id ORDER BY MIN(l.seq)""")
+            return [{"position_id": pid, "quantity": qty, "remaining_basis": _dollars(basis), "contract": contract}
+                    for pid, qty, basis, contract in rows]
+
+    def open_lifecycle(self, contract: str) -> str | None:
+        """Lifecycle id currently holding this contract, if any (long-only)."""
+        for row in self.inventory():
+            if row["contract"] == contract:
+                return row["position_id"]
+        return None
