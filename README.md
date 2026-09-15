@@ -4,7 +4,8 @@ Paper-only options swing-trading system, built safety-first.
 
 **Status: milestone 1 complete; milestone 2 in progress — read-only paper client,
 persistent accounting foundations, raw activity staging, and a Layer 1 scanner
-with a Polygon/Massive market-data adapter and shadow-only CLI.**
+with a Polygon/Massive market-data adapter, shadow-only CLI, and an
+underlying-level backtest replay.**
 No order submission, live configuration, scheduler, or dashboard exists yet. An `approved: true` result is a validation decision, not an executable
 authorization. Nothing in this repository places trades. Broker connectivity has
 only been tested using fake responses, not real credentials. The market-data
@@ -54,6 +55,11 @@ PYTHONPATH=src python -m unittest discover -s tests -v
   diagnostics, and provider-to-`SymbolSnapshot` normalization.
 - `src/alpaca_agents/scanner/__main__.py`: manual ETF shadow scan and JSON report;
   there is no option to enable playbooks or place orders.
+- `src/alpaca_agents/backtest/`: walk-forward replay of `signals.py` over daily
+  bars (`replay.py`), multi-year history stitching / JSON cache (`history.py`),
+  and a report CLI. Underlying-level R only; options are not modelled.
+- `tests/test_backtest.py`: no-look-ahead, one-trade-at-a-time, close-based stop,
+  end-of-data, summary math, chunk continuity, and CLI tests.
 - `tests/test_marketdata.py`: fake data-to-shadow integration, freshness, malformed
   data, pagination security, and credential/audit isolation tests.
 - `tests/test_scanner.py`: every playbook's output is fed through the real
@@ -400,6 +406,54 @@ historical performance. Reports are not executable authorizations. The engine
 has no verified backtest results, automatic enablement, portfolio reconciliation,
 or trading connection. Protect these report/audit files and keep them out of git.
 
+## Backtest replay (underlying-level evidence, not options P&L)
+
+```sh
+# fetch + cache several years of daily bars, then replay all playbooks
+python -m alpaca_agents.backtest --symbol SPY --start 2019-01-01 --end 2026-09-12 \
+  --save-bars runtime/bars-SPY.json
+# repeatable, offline re-runs
+python -m alpaca_agents.backtest --symbol SPY --bars-file runtime/bars-SPY.json
+```
+
+`replay()` walks the bars session by session. At each session it hands the
+signal functions only the bars up to and including that session (no look-ahead),
+keeps at most one open trade per playbook per symbol, and then simulates the
+underlying forward:
+
+- **Fill**: next session's open for close-based entries; for trigger entries,
+  the first of the next 3 sessions whose high/low touches the trigger, filled at
+  the worse of open or trigger. No touch => `no_fill`.
+- **Stop**: close-based, matching the playbook's "closes back through" wording.
+  Trend uses the *current* EMA20 each session; bounce and breakout use the fixed
+  swing-low / range-top level. A gap through the stop exits at the worse close.
+  Same-session stop and target counts as a loss. Filling already through the
+  stop counts as a -1R loss.
+- **Target**: intraday touch (high >= target for longs).
+- **Time stop**: approximated in sessions (`HOLD_LIMIT`: trend/breakout 15,
+  bounce 10); exits at that session's close as `timeout` with its actual R.
+- Trades that cannot resolve before the data ends are `unresolved` and excluded.
+
+`summarize()` reports per playbook: signals, fills, wins/losses/timeouts, win
+rate, expectancy in R, average win/loss R, median sessions held, a
+`failed_breakout_rate` (breakout losses within 3 sessions), and two gates from
+the playbook: `sample_sufficient` (>= 30 resolved) and `negative_expectancy`.
+
+**What this does and does not prove.** An R-multiple here is on the underlying.
+A 1.5R underlying win can still be a losing option trade after IV crush, theta,
+bid-ask and fees; a -1R underlying loss is roughly the option's -50% premium stop
+only by coincidence. Establishing *options* expectancy needs point-in-time option
+quotes, which this repo does not have. Treat these reports as a necessary filter
+(a playbook that loses on the underlying will not be saved by the option), not as
+sufficient evidence. The report says `options_pnl_modelled: false` and carries
+its caveats inline. Nothing in the backtest can enable a playbook; enablement
+remains a manual, reviewed edit to `ScanConfig.enabled_playbooks`.
+
+History is fetched in <= 700-day chunks via the same audited market-data client,
+checked for chunk continuity, and validated as one ascending series. Provider
+daily aggregates are split-adjusted ET-day bars; dividend adjustment and
+survivorship are not handled. Keep cached bars under `runtime/` (ignored).
+
 ## Remaining milestones / execution prerequisites
 
 1. Extend the read-only paper client into an executor in a separate
@@ -427,10 +481,10 @@ or trading connection. Protect these report/audit files and keep them out of git
    can cross stops. Spread assignment can create stock/cash obligations; do not
    enable spread execution without an expiration/assignment policy.
 7. Verified session calendar, stock earnings, IV history and data fallbacks;
-   backtesting with point-in-time historical option quotes/fees/exits (a pure
-   underlying-bar replay cannot establish options expectancy), using
-   vectorbt/backtrader per the playbook; measure per-playbook expectancy and
-   failed-breakout rate before enabling any playbook; extend
+   run the underlying-level replay on real multi-year ETF history and review it;
+   then, if obtainable, point-in-time option quotes to model premium/fees/exits
+   (the underlying replay is necessary but not sufficient); only after review,
+   enable a playbook. Extend
    transactional ledger events to all order/decision events; notifications;
    read-only dashboard; then scheduled paper runs. Cut any playbook showing
    negative expectancy over 30+ triggered ideas.

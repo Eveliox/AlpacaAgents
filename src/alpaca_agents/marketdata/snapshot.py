@@ -40,20 +40,26 @@ def _time(value: int, units_per_second: int) -> datetime:
     return EPOCH + timedelta(microseconds=value * 1_000_000 // units_per_second)
 
 
+def bars_from_payload(payload: dict, *, symbol: str) -> list:
+    """Parse one bounded daily-aggregate response into Bars (no length/session checks)."""
+    if payload.get("ticker") != symbol or payload.get("adjusted") is not True or payload.get("next_url"):
+        raise ValueError("wrong symbol, unadjusted or incomplete bars")
+    rows = payload["results"]
+    if not isinstance(rows, list):
+        raise ValueError("missing bars")
+    bars = []
+    for row in rows:
+        # US daily windows start at ET midnight (04:00/05:00 UTC), on the
+        # same calendar date. This is not a generic global-exchange adapter.
+        day = _time(row["t"], 1_000).date()  # Provider aggregate timestamps are milliseconds.
+        values = [float(_decimal(row[k])) for k in ("o", "h", "l", "c", "v")]
+        bars.append(Bar(day, *values))
+    return bars
+
+
 def normalize_bars(payload: dict, *, symbol: str, completed_session: date) -> tuple[Bar, ...]:
     try:
-        if payload.get("ticker") != symbol or payload.get("adjusted") is not True or payload.get("next_url"):
-            raise ValueError("wrong symbol, unadjusted or incomplete bars")
-        rows = payload["results"]
-        if not isinstance(rows, list):
-            raise ValueError("missing bars")
-        bars = []
-        for row in rows:
-            # US daily windows start at ET midnight (04:00/05:00 UTC), on the
-            # same calendar date. This is not a generic global-exchange adapter.
-            day = _time(row["t"], 1_000).date()  # Provider aggregate timestamps are milliseconds.
-            values = [float(_decimal(row[k])) for k in ("o", "h", "l", "c", "v")]
-            bars.append(Bar(day, *values))
+        bars = bars_from_payload(payload, symbol=symbol)
         validate_bars(bars)
         if bars[-1].day != completed_session:
             raise ValueError("last bar not requested completed session")
