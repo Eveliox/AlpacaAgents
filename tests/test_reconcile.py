@@ -199,7 +199,6 @@ class ReconcileTests(unittest.TestCase):
         cases = {
             "ACCOUNT_STATUS": dict(account=account(status="SUBMITTED")),
             "trading_blocked": dict(account=account(trading_blocked=True)),
-            "pattern_day_trader": dict(account=account(pattern_day_trader=True)),
             "OPTIONS_LEVEL": dict(account=account(options_trading_level=1)),
             "NOT_CASH_ACCOUNT": dict(account=account(multiplier="4")),
             "ACCOUNT_FIELDS_INVALID": dict(account=account(cash="NaN")),
@@ -244,6 +243,13 @@ class ReconcileTests(unittest.TestCase):
         self.assertFalse(self.good(account=account(multiplier="3"), config=ReconcileConfig(margin_paper_acknowledged=True)).state.reconciled)
         with self.assertRaises(TypeError):
             ReconcileConfig(allow_margin_paper=True)
+
+    def test_pdt_flag_is_informational_not_blocking(self):
+        # Paper accounts under $25k report PDT; the exit manager forbids same-day round trips, so it cannot bite.
+        result = self.good(account=account(pattern_day_trader=True))
+        self.assertTrue(result.state.reconciled, result.reasons)
+        self.assertTrue(result.details["pattern_day_trader"])
+        self.assertNotIn("pattern_day_trader", self.good().details)
 
     def test_capital_cap_bounds_spendable_cash(self):
         big = account(cash="100000.00", non_marginable_buying_power="100000.00", options_buying_power="100000.00")
