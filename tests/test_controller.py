@@ -311,3 +311,86 @@ class ControllerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManualCommandTests(ControllerTests):
+    """release-intent and flatten via the executor CLI against the fake broker."""
+
+    def cli(self, *argv):
+        import io
+        from contextlib import redirect_stdout, redirect_stderr
+        from unittest.mock import patch
+        from alpaca_agents.executor import __main__ as cli
+        out, err = io.StringIO(), io.StringIO()
+        base = ["prog", "--fills-db", str(self.root / "f.sqlite3"), "--orders-db", str(self.root / "o.sqlite3"),
+                "--control-file", str(self.control), "--trace-db", str(self.root / "t.sqlite3"),
+                "--history-db", str(self.root / "a.sqlite3")]
+        with patch("sys.argv", base + list(argv)), patch.dict("os.environ", {"ALPACA_PAPER_API_KEY": "k", "ALPACA_PAPER_API_SECRET": "s"}), \
+                patch("alpaca_agents.executor.__main__.PaperClient", lambda creds, traces: self.client), \
+                redirect_stdout(out), redirect_stderr(err):
+            code = cli.main()
+        return code, out.getvalue(), err.getvalue()
+
+    def test_release_intent_requires_broker_404_and_note(self):
+        self.broker.reject_next = 500
+        self.cycle()   # leaves a claimed, unacknowledged intent
+        aid = self.journal.live_intents()[0]["authorization_id"]
+        code, out, err = self.cli("release-intent", aid)
+        self.assertEqual(code, 1)
+        self.assertIn("--note", err)
+        code, out, err = self.cli("release-intent", aid, "--note", "checked broker UI: no order")
+        self.assertEqual((code, out.strip()), (0, "released"))
+        self.assertEqual(self.journal.live_intents(), [])
+        self.assertEqual(self.journal.events()[0]["event"], "intent_released_manually")
+        self.assertEqual(self.cli("release-intent", aid, "--note", "again")[0], 1)
+        # And the next cycle is clean again.
+        self.assertTrue(self.cycle()["stages"]["reconcile"]["ok"])
+
+    def test_release_intent_refuses_when_broker_has_the_order(self):
+        self.cycle()   # submitted, acknowledged
+        aid = self.journal.live_intents()[0]["authorization_id"]
+        code, out, err = self.cli("release-intent", aid, "--note", "x")
+        self.assertEqual(code, 1)
+        self.assertIn("live", err)
+        self.broker.fill("paper-" + aid, "0.90")
+        code, out, err = self.cli("release-intent", aid, "--note", "x")
+        self.assertEqual(code, 0)
+        self.assertIn("resolved from broker status", out)
+        self.assertEqual(self.journal.live_intents(), [])
+
+    def test_flatten_dry_run_then_submit(self):
+        self.cycle()
+        self.t = datetime.now(timezone.utc) - timedelta(seconds=1)
+        self.broker.fill(self.journal.live_intents()[0]["client_order_id"], "0.90")
+        self.broker.marks[CONTRACT] = "1.20"
+        self.cycle()   # books the fill
+        self.assertEqual(self.cli("flatten", "SPY261016C00205000")[0], 1)          # not held
+        code, out, err = self.cli("flatten", CONTRACT)
+        self.assertEqual(code, 0)
+        self.assertIn("Dry run", err)
+        self.assertEqual(self.journal.live_intents(), [])                          # released, not an incident
+        self.assertEqual(len(self.posts()), 1)
+        code, out, err = self.cli("flatten", CONTRACT, "--submit")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.posts()), 2)
+        sell = self.broker.orders["bo-2"]
+        self.assertEqual((sell["side"], sell["limit_price"], sell["symbol"]), ("sell", "1.14", CONTRACT))
+        self.assertEqual(self.cli("intents")[1].count("manual_flatten"), 0)        # live_intents has no idea text
+        self.assertEqual(self.journal.live_intents()[0]["kind"], "exit")
+        self.assertTrue(self.cycle()["stages"]["reconcile"]["ok"])                 # matched open sell
+
+    def test_ema20_rule_fires_in_cycle_with_bars_provider(self):
+        from alpaca_agents.scanner.indicators import Bar
+        self.idea["exit_plan"]["underlying_stop_rule"] = "close back through EMA20 against position"
+        self.cycle()
+        self.t = datetime.now(timezone.utc) - timedelta(seconds=1)
+        self.broker.fill(self.journal.live_intents()[0]["client_order_id"], "0.90")
+        self.broker.marks[CONTRACT] = "0.85"
+        flat = tuple(Bar(date(2026, 8, 1) + timedelta(days=i), 202, 203, 201, 202, 1e6) for i in range(30))
+        report = run_cycle(client=self.client, ledger=self.ledger, store=self.store, journal=self.journal,
+                           notifier=self.notifier, ideas_provider=lambda **kw: self.ideas,
+                           closes_provider=lambda s: {"IWM": Decimal("201")}, bars_provider=lambda s: {"IWM": flat},
+                           now=datetime.now(timezone.utc), config=CycleConfig(submit=True, enabled_playbooks=frozenset({"trend_directional"})),
+                           report_path=self.root / "c.jsonl")
+        self.assertEqual(report["stages"]["exits"][0]["note"], "underlying_rule")
+        self.assertEqual(report["stages"]["exits"][0]["submission"]["outcome"], "submitted")

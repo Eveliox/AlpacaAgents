@@ -333,8 +333,12 @@ so lifecycles are never misattributed. Session date is the ET date of the
 execution. Per-execution fees are booked as 0 because Alpaca bills options
 regulatory fees as separate `FEE` activities; those are booked on their activity
 date and count **fully toward the daily loss counter** (conservative, cents).
-`CSD/CSW/JNLC/INT/DIV` are ignored. `OPEXP`, `OPASN`, `OPEXC`, equity fills,
-fee credits and unknown types block reconciliation until handled explicitly.
+`CSD/CSW/JNLC/INT/DIV` are ignored. `OPEXP` on a contract the ledger holds
+long, dated on that contract's expiration, with zero value and exactly the held
+quantity, is booked as a $0 `sell_to_close` (the whole basis becomes realized
+loss and counts toward the breaker); any deviation blocks. `OPASN`, `OPEXC`,
+equity fills, fee credits and unknown types block reconciliation until handled
+explicitly.
 
 A reconciled state is a 60-second snapshot and **authorizes nothing by itself**;
 it is the baseline the order journal validates against.
@@ -396,16 +400,18 @@ a broker-observed terminal status.
 `exits.evaluate_exit(HeldOption, idea, trading_day)` is pure. Priority:
 
 1. `underlying_stop` - last completed session close through the idea's stop
-2. `premium_stop` - option mark x 100 <= basis x (1 - `premium_stop_pct`/100)
-3. `underlying_target` - close through the idea's target
-4. `time_stop` - DTE <= `time_stop_dte`, or weekday sessions held >= `time_stop_sessions`
+2. `underlying_rule` - the playbook's discretionary rule when bars are supplied:
+   trend ideas exit on a close through EMA20 against the position. The bounce
+   and breakout rules are already the idea's stop (swing low / range high).
+3. `premium_stop` - option mark x 100 <= basis x (1 - `premium_stop_pct`/100)
+4. `underlying_target` - close through the idea's target
+5. `time_stop` - DTE <= `time_stop_dte`, or NYSE sessions held >= `time_stop_sessions`
 
 The exit is a **day limit sell at 95% of the mark** (floored at $0.01): a
 deliberately marketable limit for paper. Basis includes entry fees, so the
 premium stop is slightly conservative. Session counting uses the NYSE calendar. Missing close => underlying rules are
 skipped; missing mark => a fired rule is reported for manual attention but no
-order is priced. The playbooks' discretionary "close back through EMA20" rules
-are **not** implemented.
+order is priced.
 
 ## Controller cycle and runbook
 
@@ -455,6 +461,16 @@ disable. `--enable-playbook` without the marker is refused and logged.
    playbook - proves the cycle reconciles live without submitting.
 5. Backtest, review, approve one playbook, then `--submit`. Watch the
    dashboard and `cycles.jsonl` for the first entry, its fill, and its exit.
+
+**Human-in-the-loop commands** (`python -m alpaca_agents.executor ...`):
+
+| command | what it does |
+|---|---|
+| `intents` | list reserved/claimed intents |
+| `release-intent <auth_id> --note "..."` | for a `CLAIMED_INTENT_WITHOUT_BROKER_RECORD` incident: looks the order up by client id **again**; if the broker has it, resolves from broker status (or refuses if it is live); only on a fresh 404 for a never-acknowledged intent does it release the slot, auditing the 404 trace id and your note |
+| `flatten <OCC> [--submit]` | manual exit of a held contract at 95% of the broker mark; dry run prepares and releases, `--submit` sends |
+
+There is deliberately no command that releases an intent the broker acknowledged.
 
 **Loop mode.** `--every N` (N >= 60) runs a cycle every N seconds and stops
 with exit 0 when the only reasons are `MARKET_CLOSED` / `NOT_A_SESSION`, or
@@ -702,18 +718,16 @@ Still open, roughly in priority order:
    validated by the rules engine but refused by the journal
    (`UNSUPPORTED_EXECUTION_STRUCTURE`): multi-leg orders, ledger lifecycles,
    position matching and assignment/expiration policy do not exist.
-4. **Expiration / assignment / exercise** activities (`OPEXP`, `OPASN`,
-   `OPEXC`) block reconciliation until handled explicitly. Time stops at
-   21 DTE make this unlikely but not impossible (an unfilled exit day order).
+4. **Assignment / exercise** (`OPASN`, `OPEXC`) block reconciliation; only
+   worthless expiration (`OPEXP`) is handled. Its activity shape is from the
+   API docs, not observed: a mismatch blocks rather than guesses.
 5. **Unfilled orders.** Entry and exit orders are day limits. An unfilled exit
    is re-evaluated next session with a fresh decision key; there is no
    cancel/replace and no "chase" logic. An unfilled entry simply expires.
-6. **Discretionary exit rules** ("close back through EMA20") need the indicator
-   pipeline at exit time.
-7. **Options-level backtest.** The replay is underlying-level R only. Enable
+6. **Options-level backtest.** The replay is underlying-level R only. Enable
    a playbook only after reviewing it, and cut any playbook with negative
    expectancy over 30+ triggered ideas.
-8. **Live trading**: not designed, not planned in this repository. It would
+7. **Live trading**: not designed, not planned in this repository. It would
    need a separate default-off configuration path and explicit owner approval
    after a paper track record.
 

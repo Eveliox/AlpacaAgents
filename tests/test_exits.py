@@ -84,6 +84,26 @@ class ExitRuleTests(unittest.TestCase):
         self.assertIsNone(evaluate_exit(held(entry_day=DAY.replace(day=20)), idea(), trading_day=DAY)[0])
         self.assertIsNone(evaluate_exit(held(basis=Decimal("0")), idea(), trading_day=DAY)[0])
 
+    def test_ema20_rule_uses_bars(self):
+        from alpaca_agents.scanner.indicators import Bar
+        plan = {"premium_stop_pct": 50, "time_stop_dte": 21, "underlying_stop_rule": "close back through EMA20 against position"}
+        from datetime import timedelta
+        # Flat series around 202: EMA20 ~ 202. Idea stop 195, target 210.
+        flat = tuple(Bar(date(2026, 8, 1) + timedelta(days=i), 202, 203, 201, 202, 1e6) for i in range(30))
+        decision, note = evaluate_exit(held(underlying_close=Decimal("201"), bars=flat), idea(exit_plan=plan), trading_day=DAY)
+        self.assertEqual(note, "underlying_rule")
+        self.assertIn("EMA20", decision["detail"])
+        # Close above EMA20 and below target -> hold.
+        decision, note = evaluate_exit(held(underlying_close=Decimal("204"), bars=flat), idea(exit_plan=plan), trading_day=DAY)
+        self.assertIsNone(decision, decision)
+        rising = flat
+        # No bars / too few bars / other rule strings -> rule skipped, not an error.
+        self.assertIsNone(evaluate_exit(held(underlying_close=Decimal("203")), idea(exit_plan=plan), trading_day=DAY)[0])
+        self.assertIsNone(evaluate_exit(held(underlying_close=Decimal("203"), bars=rising[:5]), idea(exit_plan=plan), trading_day=DAY)[0])
+        # underlying_stop still wins over the rule.
+        decision, note = evaluate_exit(held(underlying_close=Decimal("100"), bars=rising), idea(exit_plan=plan), trading_day=DAY)
+        self.assertEqual(note, "underlying_stop")
+
     def test_helpers(self):
         self.assertEqual(exit_limit(Decimal("0.80")), "0.76")
         self.assertEqual(exit_limit(Decimal("0.01")), "0.01")

@@ -7,14 +7,16 @@ validates against inventory, or None with a note.
 
 Rules, in priority order (first hit wins):
   underlying_stop   close beyond the idea's stop against the position
+  underlying_rule   the playbook's discretionary rule, when bars are supplied:
+                    "close back through EMA20 against position" -> close on the
+                    wrong side of EMA20. The bounce/breakout rules are already
+                    encoded as the idea's stop (swing low / range high).
   premium_stop      mark*100 <= basis * (1 - premium_stop_pct/100)
   underlying_target close beyond the idea's target in favour of the position
   time_stop         DTE <= time_stop_dte, or NYSE sessions held >= time_stop_sessions
 
 The exit order is a DAY LIMIT sell at 95% of the mark (floored at $0.01): a
-deliberately marketable limit for paper. "Close back through EMA20" style
-discretionary rules from the playbooks are NOT implemented here; those need the
-indicator pipeline and are tracked in the README.
+deliberately marketable limit for paper.
 """
 from dataclasses import dataclass
 from datetime import date
@@ -22,6 +24,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 import re
 
 from alpaca_agents.calendar import sessions_between
+from alpaca_agents.scanner.indicators import ema
 
 OCC = re.compile(r"[A-Z]{1,6}[0-9]{6}[CP][0-9]{8}")
 CENT = Decimal("0.01")
@@ -35,6 +38,7 @@ class HeldOption:
     mark: Decimal | None           # broker current_price per share (may be missing)
     underlying_close: Decimal | None
     entry_day: date
+    bars: tuple = ()               # ascending completed daily bars ending on the same session as underlying_close
 
 
 def _dec(value) -> Decimal:
@@ -92,6 +96,14 @@ def evaluate_exit(held: HeldOption, idea: dict, *, trading_day: date) -> tuple[d
         if close is not None:
             if (direction == "long" and close <= stop) or (direction == "short" and close >= stop):
                 reason, detail = "underlying_stop", f"close {close} vs stop {stop}"
+        if reason is None and close is not None and held.bars:
+            rule = plan.get("underlying_stop_rule")
+            if rule == "close back through EMA20 against position":
+                closes = [b.close for b in held.bars]
+                if len(closes) >= 20 and held.bars[-1].day <= trading_day:
+                    e20 = Decimal(str(ema(closes, 20))).quantize(CENT, rounding=ROUND_HALF_UP)
+                    if (direction == "long" and close < e20) or (direction == "short" and close > e20):
+                        reason, detail = "underlying_rule", f"close {close} through EMA20 {e20} against {direction}"
         if reason is None and mark is not None:
             pct = plan.get("premium_stop_pct")
             if type(pct) is int and 0 < pct < 100:

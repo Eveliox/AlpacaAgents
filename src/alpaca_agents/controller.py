@@ -77,7 +77,9 @@ def _marks(positions: list) -> dict:
 
 
 def run_cycle(*, client, ledger, store, journal, notifier, ideas_provider, closes_provider,
-              now: datetime, config: CycleConfig, report_path: Path) -> dict:
+              now: datetime, config: CycleConfig, report_path: Path, bars_provider=None) -> dict:
+    """closes_provider(symbols) -> {symbol: Decimal close of the last completed session}
+    bars_provider(symbols)   -> {symbol: ascending Bar tuple ending on that session} (optional)"""
     cycle_id = uuid4().hex
     report = {"cycle_id": cycle_id, "started_at": now.isoformat(), "submit": config.submit is True,
               "control_mode": control_mode(journal.control_file), "enabled_playbooks": sorted(config.enabled_playbooks),
@@ -121,9 +123,11 @@ def run_cycle(*, client, ledger, store, journal, notifier, ideas_provider, close
     if inventory and mode in ("ARMED_PAPER", "EXITS_ONLY"):
         try:
             marks = _marks(client.positions())
-            closes = closes_provider(sorted({row["contract"][:-15] for row in inventory}))
+            symbols = sorted({row["contract"][:-15] for row in inventory})
+            closes = closes_provider(symbols)
+            bars = bars_provider(symbols) if bars_provider is not None else {}
         except Exception as exc:  # provider failure must not crash the cycle
-            marks, closes = {}, {}
+            marks, closes, bars = {}, {}, {}
             notifier.send("warning", "Exit inputs unavailable", {"cycle_id": cycle_id, "error": type(exc).__name__}, now=now)
         for row in inventory:
             contract = row["contract"]
@@ -132,7 +136,8 @@ def run_cycle(*, client, ledger, store, journal, notifier, ideas_provider, close
                 exits.append({"contract": contract, "note": "no journaled entry idea; manual exit only"})
                 continue
             held = HeldOption(contract, row["quantity"], row["remaining_basis"], marks.get(contract),
-                              closes.get(contract[:-15]), date.fromisoformat(entry["trading_day"]))
+                              closes.get(contract[:-15]), date.fromisoformat(entry["trading_day"]),
+                              tuple(bars.get(contract[:-15], ())))
             decision, note = evaluate_exit(held, entry["idea"], trading_day=trading_day)
             record = {"contract": contract, "note": note}
             if decision is not None and config.submit is not True:
@@ -247,12 +252,23 @@ def _live_providers(session: date, audit_path: Path, universe):
                 continue
         return closes
 
+    def bars_provider(symbols):
+        out = {}
+        for symbol in symbols:
+            try:
+                bars = snapshot(symbol).bars
+                if bars and bars[-1].day == session:
+                    out[symbol] = bars
+            except MarketDataError:
+                continue
+        return out
+
     enabled = frozenset()
 
     def bind(playbooks):
         nonlocal enabled
         enabled = playbooks
-    return ideas_provider, closes_provider, bind
+    return ideas_provider, closes_provider, bars_provider, bind
 
 
 HALT_PREFIXES = ("CLAIMED_INTENT", "UNKNOWN_OPEN_ORDER", "POSITION_MISMATCH", "ACCOUNT_", "NOT_CASH_ACCOUNT", "HISTORY_")
@@ -366,15 +382,15 @@ def _run(args, rt: Path) -> int:
     now = datetime.now(timezone.utc)
     from .executor.eastern import eastern_date
     session = args.session or previous_weekday(eastern_date(now))
-    ideas_provider, closes_provider, bind = _live_providers(session, rt / "market-data.jsonl", args.symbols)
+    ideas_provider, closes_provider, bars_provider, bind = _live_providers(session, rt / "market-data.jsonl", args.symbols)
     bind(enabled)
     ledger, store = FillLedger(rt / "fills.sqlite3"), ActivityStore(rt / "activities.sqlite3")
     config = CycleConfig(submit=args.submit, enabled_playbooks=enabled)
 
     def one(now):
         report = run_cycle(client=client, ledger=ledger, store=store, journal=journal, notifier=notifier,
-                           ideas_provider=ideas_provider, closes_provider=closes_provider, now=now, config=config,
-                           report_path=rt / "cycles.jsonl")
+                           ideas_provider=ideas_provider, closes_provider=closes_provider, bars_provider=bars_provider,
+                           now=now, config=config, report_path=rt / "cycles.jsonl")
         if args.dashboard:
             from .dashboard import build
             build(rt, rt / "dashboard.html", now=datetime.now(timezone.utc))

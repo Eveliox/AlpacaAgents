@@ -112,6 +112,40 @@ class NormalizeTests(unittest.TestCase):
         # A genuinely new sell with no inventory still blocks.
         self.assertFalse(self.run_norm([fill("s2", "sell", when=NOW - timedelta(minutes=20))]).complete)
 
+    def test_opexp_closes_held_long_at_zero_and_latches_loss(self):
+        expiry_day = date(2026, 10, 16)
+        opexp = {"id": "x1", "activity_type": "OPEXP", "date": expiry_day.isoformat(), "symbol": CONTRACT,
+                 "qty": "1", "net_amount": "0", "description": "expired"}
+        # Nothing held -> blocked, and it halts later fills.
+        first = self.run_norm([opexp])
+        self.assertFalse(first.complete)
+        self.assertEqual(first.blocked[0]["reason"], "OPEXP_QUANTITY_MISMATCH")
+        # Held long -> booked as a $0 close on the expiration session; whole basis is the loss.
+        buy = fill("b1", "buy", price="0.30")
+        result = normalize_activities([buy, {**opexp, "id": "x2"}], self.ledger, account_id="acct",
+                                      recorded_at=datetime(2026, 10, 17, tzinfo=timezone.utc))
+        self.assertTrue(result.complete, result.blocked)
+        self.assertEqual(self.ledger.inventory(), [])
+        summary = self.ledger.daily_summary(expiry_day)
+        self.assertEqual(summary["realized_loss"], Decimal("30"))
+        # Replay is idempotent even though inventory is now empty.
+        again = normalize_activities([{**opexp, "id": "x2"}], self.ledger, account_id="acct",
+                                     recorded_at=datetime(2026, 10, 17, tzinfo=timezone.utc))
+        self.assertTrue(again.complete)
+        self.assertEqual(again.replayed, 1)
+
+    def test_opexp_shape_deviations_block(self):
+        normalize_activities([fill("b1", "buy")], self.ledger, account_id="acct", recorded_at=NOW)
+        base = {"id": "x", "activity_type": "OPEXP", "date": "2026-10-16", "symbol": CONTRACT, "qty": "1", "net_amount": "0"}
+        for bad, code in [({"date": "2026-10-15"}, "OPEXP_DATE_MISMATCH"), ({"net_amount": "5"}, "OPEXP_NONZERO_VALUE"),
+                          ({"qty": "2"}, "OPEXP_QUANTITY_MISMATCH"), ({"symbol": "IWM"}, "NON_STANDARD_OPTION_FILL")]:
+            with self.subTest(code=code):
+                result = normalize_activities([{**base, **bad}], self.ledger, account_id="acct",
+                                              recorded_at=datetime(2026, 10, 17, tzinfo=timezone.utc))
+                self.assertFalse(result.complete)
+                self.assertEqual(result.blocked[0]["reason"], code)
+        self.assertEqual(self.ledger.inventory()[0]["quantity"], 1)   # still held
+
     def test_new_lifecycle_after_full_close(self):
         self.run_norm([fill("b1", "buy"), fill("s1", "sell", when=NOW - timedelta(minutes=30))])
         result = self.run_norm([fill("b2", "buy", when=NOW - timedelta(minutes=20))])

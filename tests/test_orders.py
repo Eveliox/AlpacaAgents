@@ -239,6 +239,23 @@ class OrderJournalTests(unittest.TestCase):
         state = replace(self.state, open_positions=1)
         self.assertTrue(self.reserve("next", self.other(), state=state)["approved"])
 
+    def test_manual_release_only_for_unacknowledged_claimed_intents(self):
+        aid = self.reserve()["authorization_id"]
+        self.assertFalse(self.journal.release_unsent(aid, broker_lookup_local_id="t1", operator_note="x", now=NOW))  # reserved
+        self.claim(aid)
+        with self.assertRaises(ValueError):
+            self.journal.release_unsent(aid, broker_lookup_local_id="t1", operator_note="  ", now=NOW)
+        self.assertTrue(self.journal.release_unsent(aid, broker_lookup_local_id="t1", operator_note="verified 404", now=NOW))
+        self.assertEqual(self.journal.live_intents(), [])
+        event = self.journal.events()[0]
+        self.assertEqual((event["event"], event["payload"]["operator_note"]), ("intent_released_manually", "verified 404"))
+        # Acknowledged intents cannot be manually released.
+        aid2 = self.reserve("k2", self.other("SPY"))["authorization_id"]
+        self.claim(aid2)
+        self.journal.mark_submitted(aid2, broker_order_id="bo", broker_status="accepted", now=NOW)
+        self.assertFalse(self.journal.release_unsent(aid2, broker_lookup_local_id="t2", operator_note="no", now=NOW))
+        self.assertEqual(self.journal.live_intents()[0]["authorization_id"], aid2)
+
     def test_provider_errors_are_sanitized_and_audited(self):
         def provider(): raise RuntimeError("fake-secret")
         result = self.journal.reserve("provider-error", self.idea, state_provider=provider, now=NOW, trading_day=DAY)

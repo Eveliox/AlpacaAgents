@@ -208,7 +208,8 @@ class PaperClient:
         try:
             return self._get("/v2/orders:by_client_order_id", dict, query={"client_order_id": client_order_id})
         except ExecutorError as exc:
-            if "status=404" in str(exc):
+            if exc.status == 404:
+                self.last_not_found_trace = exc.local_id   # evidence for a manual release
                 return None
             raise
 

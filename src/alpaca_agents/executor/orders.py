@@ -29,7 +29,7 @@ from .ledger import _identifier
 
 AUTH_TTL = timedelta(seconds=30)
 OCC = r"[A-Z]{1,6}[0-9]{6}[CP][0-9]{8}"
-EXIT_REASONS = frozenset({"premium_stop", "underlying_stop", "underlying_target", "time_stop", "manual_flatten"})
+EXIT_REASONS = frozenset({"premium_stop", "underlying_stop", "underlying_rule", "underlying_target", "time_stop", "manual_flatten"})
 
 
 def _stamp(value: datetime) -> str:
@@ -383,6 +383,31 @@ class OrderJournal:
                        (f"BROKER_REJECTED: http {http_status} request {request_id}", authorization_id))
             self._event(db, stamp, "intent_unplaced", {"authorization_id": authorization_id,
                                                       "http_status": http_status, "request_id": request_id})
+        return True
+
+    def release_unsent(self, authorization_id: str, *, broker_lookup_local_id: str, operator_note: str, now: datetime) -> bool:
+        """Human-driven release of a claimed intent that was NEVER acknowledged by the broker.
+
+        Preconditions the CLI must establish and pass evidence for: the intent
+        has no broker_order_id, and a fresh by-client-id lookup returned 404
+        (broker_lookup_local_id is that request's trace id). The operator note
+        is audited verbatim. Anything with a broker_order_id must go through
+        resolve() with the broker's terminal status instead.
+        """
+        _identifier(authorization_id)
+        _identifier(broker_lookup_local_id)
+        if not isinstance(operator_note, str) or not operator_note.strip() or len(operator_note) > 500:
+            raise ValueError("Operator note required")
+        stamp = _stamp(now)
+        with self._transaction() as db:
+            row = db.execute("SELECT status,broker_order_id FROM order_intents WHERE authorization_id=?", (authorization_id,)).fetchone()
+            if row is None or row["status"] != "claimed" or row["broker_order_id"] is not None:
+                return False
+            db.execute("UPDATE order_intents SET status='resolved:released_manual',reason=? WHERE authorization_id=?",
+                       (f"MANUAL_RELEASE: broker 404 trace {broker_lookup_local_id}", authorization_id))
+            self._event(db, stamp, "intent_released_manually", {"authorization_id": authorization_id,
+                                                              "broker_lookup_local_id": broker_lookup_local_id,
+                                                              "operator_note": operator_note.strip()})
         return True
 
     TERMINAL = frozenset({"filled", "canceled", "expired", "rejected", "replaced", "done_for_day"})
