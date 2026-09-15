@@ -3,7 +3,7 @@
 Paper-only options swing-trading system, built safety-first.
 
 **Status: milestone 1 complete; milestone 2 in progress — read-only paper client
-and persistent closed-trade accounting foundation.**
+and persistent closed-trade / long-option fill accounting foundations.**
 No order submission, live configuration, scanner, scheduler, or dashboard exists
 yet. An `approved: true` result is a validation decision, not an executable
 authorization. Nothing in this repository places trades. Broker connectivity has
@@ -38,6 +38,9 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 - `src/alpaca_agents/executor/ledger.py`: duplicate-safe closed-trade accounting,
   daily loss latches, and transactional close/breaker events.
 - `tests/test_ledger.py`: restart, replay, concurrency, rollback, and accounting tests.
+- `src/alpaca_agents/executor/fills.py`: normalized long-option FIFO inventory and
+  realized P&L on every closing execution, including partial closes.
+- `tests/test_fills.py`: partial realizations, FIFO, rounding, ordering, and atomicity.
 - `tests/test_executor.py`: fake-transport tests; no network or real credentials.
 - `examples/long_call.json`: synthetic input, not a current quote or recommendation.
 - `tests/test_rules.py`: rejection, boundary, spread, state, kill-switch, and audit tests.
@@ -161,13 +164,55 @@ status, and closed-trade count. `events()` exposes ordered close/trigger history
 These are ledger summaries, **not evidence of completed broker reconciliation**;
 an empty ledger means no imported records, not proof that the account has no losses.
 
-**Not connected to trading authorization yet.** This version accounts only for
-fully closed positions. A fill reconciler must handle partial-close realized P&L
-on the actual realization day, allocations across spread legs, assignment,
-exercise, expiry, corrections, and missing history before any use in `RiskState`.
-Do not defer partial realized losses until the final close in a trading system.
-Open positions, pending orders, settled cash, and history-completeness checks are
-still absent. No import CLI is exposed to accept scanner-supplied accounting.
+**Not connected to trading authorization yet.** `TradeLedger` accounts only for
+fully closed positions. Keep it as a standalone lifecycle-reporting prototype;
+use the fill-level foundation below for future incremental accounting. **Never
+sum the two ledgers' P&L or loss counters:** that would double-count realizations.
+No automatic migration or connection between these stores exists.
+
+## Fill-level accounting (offline, long options only)
+
+`FillLedger(Path("runtime/fills.sqlite3"))` accepts normalized `OptionFill` records.
+It is not an Alpaca activity importer. Each record requires a stable execution ID,
+unique position-lifecycle ID, standard OCC contract, side (`buy_to_open` or
+`sell_to_close`), integral quantity, total execution premium, actual fees,
+timezone-aware execution timestamp, and trusted exchange session date.
+
+- Buys create FIFO lots with premium plus entry fees as their remaining basis.
+- Sells consume the oldest lots, allocate entry fees, and subtract actual exit
+  fees. P&L is booked on **each sell execution's session date**, even when contracts
+  remain open. FIFO is an internal accounting policy, not a verified match to
+  Alpaca's tax-lot or displayed cost-basis methodology.
+- Losing sell executions accumulate toward the $40 breaker; winning executions
+  never offset them. This is deliberately more conservative than netting a whole
+  lifecycle's profits and losses. The latch and its one-time event persist.
+- Integer microdollars avoid float errors. Partial basis allocation rounds upward
+  by less than one microdollar; the remainder stays on the lot so full-close totals
+  conserve every fee. Inputs permit at most six fractional decimal places.
+- Fill, inventory changes, realized P&L, latch, and audit events commit together.
+  Identical replays are no-ops; conflicting IDs, unmatched closes, oversells,
+  contract mismatches, and reuse of a closed lifecycle raise `LedgerError`.
+- Events must be strictly increasing in time within each lifecycle. Out-of-order
+  or equal-timestamp distinct executions are rejected rather than guessed into
+  an order. A future importer needs verified ordering and controlled rebuilding
+  for late history/corrections, preserving already-triggered live-day latches.
+
+`inventory()` reports **remaining lots**, not a reconciled broker position count.
+`daily_summary(day)` reports P&L/loss/latch and always includes `reconciled=False`.
+`events(limit=100)` returns the latest accounting/trigger events, newest first;
+premium and fee fields in these events are integer microdollars.
+
+The ledger can account for historical multi-contract and same-day fills. This is
+not trading permission: historical violations must not be silently omitted from
+accounting, and the rules engine's one-unit/swing-entry restrictions still apply.
+
+**Still blocked:** broker history pagination/import, complete opening history,
+execution-to-order/lifecycle mapping, trusted contract metadata and calendar,
+fees completeness, spread-leg grouping, shorts, assignment/exercise/expiry,
+corrections, account scoping checks, and settled-cash reconciliation. Use one
+ledger database per account; do not mix accounts. Shape-valid OCC symbols alone
+do not verify contract eligibility or multiplier. No `RiskState` is generated,
+no scanner accounting import is exposed, and no orders can be submitted.
 
 ## Remaining milestones / execution prerequisites
 
