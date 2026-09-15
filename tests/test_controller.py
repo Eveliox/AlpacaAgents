@@ -128,6 +128,19 @@ class ControllerTests(unittest.TestCase):
     def posts(self):
         return [c for c in self.broker.calls if c[0] == "POST"]
 
+    def backdate_entries(self):
+        """Simulate positions opened on the previous session (the fake clock cannot jump days)."""
+        import sqlite3
+        from alpaca_agents.calendar import previous_session
+        from alpaca_agents.executor.eastern import eastern_date
+        yesterday = previous_session(eastern_date(datetime.now(timezone.utc))).isoformat()
+        db = sqlite3.connect(self.root / "o.sqlite3")
+        try:
+            with db:
+                db.execute("UPDATE order_intents SET trading_day=? WHERE kind='entry'", (yesterday,))
+        finally:
+            db.close()
+
     def test_dry_run_reserves_but_never_claims_or_posts(self):
         report = self.cycle(submit=False)
         self.assertTrue(report["stages"]["reconcile"]["ok"], report["stages"]["reconcile"]["reasons"])
@@ -175,7 +188,9 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual((rec["open_positions"], rec["pending"]), (1, 0))
         self.assertEqual(self.ledger.inventory()[0]["contract"], CONTRACT)
         self.assertEqual(self.journal.live_intents(), [])
-        self.assertTrue(report["stages"]["exits"][0]["note"].startswith("hold"))
+        self.assertIn("no same-day round trips", report["stages"]["exits"][0]["note"])
+        self.backdate_entries()
+        self.assertTrue(self.cycle()["stages"]["exits"][0]["note"].startswith("hold"))
         self.assertEqual(len(self.posts()), 1)
         # The fake provider ignores open_symbols; the controller must refuse a second IWM itself.
         self.assertEqual(report["stages"]["entries"]["entries"], [])
@@ -386,11 +401,15 @@ class ManualCommandTests(ControllerTests):
         self.t = datetime.now(timezone.utc) - timedelta(seconds=1)
         self.broker.fill(self.journal.live_intents()[0]["client_order_id"], "0.90")
         self.broker.marks[CONTRACT] = "0.85"
+        self.cycle()
+        self.backdate_entries()
         flat = tuple(Bar(date(2026, 8, 1) + timedelta(days=i), 202, 203, 201, 202, 1e6) for i in range(30))
         report = run_cycle(client=self.client, ledger=self.ledger, store=self.store, journal=self.journal,
                            notifier=self.notifier, ideas_provider=lambda **kw: self.ideas,
                            closes_provider=lambda s: {"IWM": Decimal("201")}, bars_provider=lambda s: {"IWM": flat},
+                           bids_provider=lambda c: {CONTRACT: Decimal("0.83")},
                            now=datetime.now(timezone.utc), config=CycleConfig(submit=True, enabled_playbooks=frozenset({"trend_directional"})),
                            report_path=self.root / "c.jsonl")
         self.assertEqual(report["stages"]["exits"][0]["note"], "underlying_rule")
         self.assertEqual(report["stages"]["exits"][0]["submission"]["outcome"], "submitted")
+        self.assertEqual(self.broker.orders["bo-2"]["limit_price"], "0.83")   # at the bid, not 95% of mark

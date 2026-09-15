@@ -14,7 +14,7 @@ from .fills import FillLedger
 from .history import ActivityStore, import_activities
 from .exits import exit_limit
 from .orders import OrderJournal
-from .reconcile import build_risk_state, trading_day_from_clock
+from .reconcile import build_risk_state, config_from_runtime, trading_day_from_clock
 from .submit import submit_claimed
 from decimal import Decimal
 
@@ -48,7 +48,7 @@ def main() -> int:
             journal = OrderJournal(args.orders_db, account_id=str(client.account().get("id")),
                                    control_file=args.control_file)
             result = build_risk_state(client, FillLedger(args.fills_db), ActivityStore(args.history_db), journal,
-                                      now=datetime.now(timezone.utc))
+                                      now=datetime.now(timezone.utc), config=config_from_runtime(args.control_file.parent))
             state = asdict(result.state)
             state["trading_day"] = state["trading_day"].isoformat()
             state["observed_at"] = state["observed_at"].isoformat()

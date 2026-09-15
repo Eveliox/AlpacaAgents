@@ -23,7 +23,7 @@ from uuid import uuid4
 from .calendar import previous_session
 from .executor.client import ExecutorError
 from .executor.exits import HeldOption, evaluate_exit
-from .executor.reconcile import build_risk_state
+from .executor.reconcile import ReconcileConfig, build_risk_state, config_from_runtime
 from .executor.submit import submit_claimed
 from .gateway import control_mode
 from .scanner.scan import PLAYBOOKS
@@ -36,6 +36,7 @@ class CycleConfig:
     submit: bool = False                       # only the CLI --submit flag sets this
     enabled_playbooks: frozenset = frozenset()
     max_entries_per_cycle: int = 1
+    reconcile: ReconcileConfig = ReconcileConfig()
 
 
 def approved_playbooks(requested, approvals_dir: Path) -> tuple[frozenset, list]:
@@ -77,9 +78,10 @@ def _marks(positions: list) -> dict:
 
 
 def run_cycle(*, client, ledger, store, journal, notifier, ideas_provider, closes_provider,
-              now: datetime, config: CycleConfig, report_path: Path, bars_provider=None) -> dict:
-    """closes_provider(symbols) -> {symbol: Decimal close of the last completed session}
-    bars_provider(symbols)   -> {symbol: ascending Bar tuple ending on that session} (optional)"""
+              now: datetime, config: CycleConfig, report_path: Path, bars_provider=None, bids_provider=None) -> dict:
+    """closes_provider(symbols)   -> {symbol: Decimal close of the last completed session}
+    bars_provider(symbols)     -> {symbol: ascending Bar tuple ending on that session} (optional)
+    bids_provider(contracts)   -> {contract: fresh NBBO bid Decimal} (optional; exits fall back to 95% of mark)"""
     cycle_id = uuid4().hex
     report = {"cycle_id": cycle_id, "started_at": now.isoformat(), "submit": config.submit is True,
               "control_mode": control_mode(journal.control_file), "enabled_playbooks": sorted(config.enabled_playbooks),
@@ -93,7 +95,7 @@ def run_cycle(*, client, ledger, store, journal, notifier, ideas_provider, close
 
     # --- 1. reconcile, resolving broker-terminal intents once ----------------
     try:
-        rec = build_risk_state(client, ledger, store, journal, now=now)
+        rec = build_risk_state(client, ledger, store, journal, now=now, config=config.reconcile)
         resolved = []
         for item in rec.details.get("resolvable", []):
             if item.get("broker_order_id") and journal.resolve(item["authorization_id"], broker_status=item["broker_status"],
@@ -101,7 +103,7 @@ def run_cycle(*, client, ledger, store, journal, notifier, ideas_provider, close
                 resolved.append(item)
         if resolved:
             now = datetime.now(timezone.utc)
-            rec = build_risk_state(client, ledger, store, journal, now=now)
+            rec = build_risk_state(client, ledger, store, journal, now=now, config=config.reconcile)
     except ExecutorError as exc:
         notifier.send("incident", "Reconciliation failed", {"cycle_id": cycle_id, "error": str(exc)}, now=now)
         return finish("reconcile", ok=False, error=str(exc))
@@ -126,8 +128,9 @@ def run_cycle(*, client, ledger, store, journal, notifier, ideas_provider, close
             symbols = sorted({row["contract"][:-15] for row in inventory})
             closes = closes_provider(symbols)
             bars = bars_provider(symbols) if bars_provider is not None else {}
+            bids = bids_provider([row["contract"] for row in inventory]) if bids_provider is not None else {}
         except Exception as exc:  # provider failure must not crash the cycle
-            marks, closes, bars = {}, {}, {}
+            marks, closes, bars, bids = {}, {}, {}, {}
             notifier.send("warning", "Exit inputs unavailable", {"cycle_id": cycle_id, "error": type(exc).__name__}, now=now)
         for row in inventory:
             contract = row["contract"]
@@ -137,7 +140,7 @@ def run_cycle(*, client, ledger, store, journal, notifier, ideas_provider, close
                 continue
             held = HeldOption(contract, row["quantity"], row["remaining_basis"], marks.get(contract),
                               closes.get(contract[:-15]), date.fromisoformat(entry["trading_day"]),
-                              tuple(bars.get(contract[:-15], ())))
+                              tuple(bars.get(contract[:-15], ())), bids.get(contract))
             decision, note = evaluate_exit(held, entry["idea"], trading_day=trading_day)
             record = {"contract": contract, "note": note}
             if decision is not None and config.submit is not True:
@@ -182,7 +185,7 @@ def run_cycle(*, client, ledger, store, journal, notifier, ideas_provider, close
 
     def provider(live_intents, now):
         # Called under the journal lock: use the journal's locked view, never reopen it.
-        fresh = build_risk_state(client, ledger, store, None, live_intents=live_intents, now=now)
+        fresh = build_risk_state(client, ledger, store, None, live_intents=live_intents, now=now, config=config.reconcile)
         return fresh.state
 
     for idea in sorted(proposals, key=lambda i: (-i.get("score", 0), i.get("symbol", "")))[:config.max_entries_per_cycle]:
@@ -263,12 +266,21 @@ def _live_providers(session: date, audit_path: Path, universe):
                 continue
         return out
 
+    def bids_provider(contracts):
+        from .marketdata.snapshot import contract_bid
+        out = {}
+        for contract in contracts:
+            bid = contract_bid(client, symbol=contract[:-15], contract=contract, now=datetime.now(timezone.utc))
+            if bid is not None:
+                out[contract] = bid
+        return out
+
     enabled = frozenset()
 
     def bind(playbooks):
         nonlocal enabled
         enabled = playbooks
-    return ideas_provider, closes_provider, bars_provider, bind
+    return ideas_provider, closes_provider, bars_provider, bids_provider, bind
 
 
 HALT_PREFIXES = ("CLAIMED_INTENT", "UNKNOWN_OPEN_ORDER", "POSITION_MISMATCH", "ACCOUNT_", "NOT_CASH_ACCOUNT", "HISTORY_")
@@ -382,15 +394,17 @@ def _run(args, rt: Path) -> int:
     now = datetime.now(timezone.utc)
     from .executor.eastern import eastern_date
     session = args.session or previous_weekday(eastern_date(now))
-    ideas_provider, closes_provider, bars_provider, bind = _live_providers(session, rt / "market-data.jsonl", args.symbols)
+    ideas_provider, closes_provider, bars_provider, bids_provider, bind = _live_providers(session, rt / "market-data.jsonl", args.symbols)
     bind(enabled)
     ledger, store = FillLedger(rt / "fills.sqlite3"), ActivityStore(rt / "activities.sqlite3")
-    config = CycleConfig(submit=args.submit, enabled_playbooks=enabled)
+    config = CycleConfig(submit=args.submit, enabled_playbooks=enabled, reconcile=config_from_runtime(rt))
+    if config.reconcile.margin_paper_acknowledged:
+        print("paper margin account acknowledged: cash semantics enforced locally", file=sys.stderr)
 
     def one(now):
         report = run_cycle(client=client, ledger=ledger, store=store, journal=journal, notifier=notifier,
                            ideas_provider=ideas_provider, closes_provider=closes_provider, bars_provider=bars_provider,
-                           now=now, config=config, report_path=rt / "cycles.jsonl")
+                           bids_provider=bids_provider, now=now, config=config, report_path=rt / "cycles.jsonl")
         if args.dashboard:
             from .dashboard import build
             build(rt, rt / "dashboard.html", now=datetime.now(timezone.utc))

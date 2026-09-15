@@ -15,8 +15,12 @@ Rules, in priority order (first hit wins):
   underlying_target close beyond the idea's target in favour of the position
   time_stop         DTE <= time_stop_dte, or NYSE sessions held >= time_stop_sessions
 
-The exit order is a DAY LIMIT sell at 95% of the mark (floored at $0.01): a
-deliberately marketable limit for paper.
+The exit order is a DAY LIMIT sell priced at the fresh NBBO bid when one is
+available (Alpaca paper fills a sell limit only when limit <= best bid), else
+at 95% of the broker mark (floored at $0.01) as a fallback.
+
+No same-trading-day round trips: a position opened today is never exited
+today (swing mandate, and a margin paper account under $25k is PDT-exposed).
 """
 from dataclasses import dataclass
 from datetime import date
@@ -39,6 +43,7 @@ class HeldOption:
     underlying_close: Decimal | None
     entry_day: date
     bars: tuple = ()               # ascending completed daily bars ending on the same session as underlying_close
+    bid: Decimal | None = None     # fresh two-sided NBBO bid, if the controller could get one
 
 
 def _dec(value) -> Decimal:
@@ -59,7 +64,10 @@ def contract_expiry(contract: str) -> date:
     return date(2000 + int(contract[-15:-13]), int(contract[-13:-11]), int(contract[-11:-9]))
 
 
-def exit_limit(mark: Decimal) -> str:
+def exit_limit(mark: Decimal | None, bid: Decimal | None = None) -> str:
+    """Bid if fresh and positive (marketable by definition); else 95% of mark; floored at $0.01."""
+    if bid is not None and bid > 0:
+        return format(bid.quantize(CENT, rounding=ROUND_DOWN), ".2f")
     price = (mark * Decimal("0.95")).quantize(CENT, rounding=ROUND_DOWN)
     return format(max(price, CENT), ".2f")
 
@@ -73,6 +81,8 @@ def evaluate_exit(held: HeldOption, idea: dict, *, trading_day: date) -> tuple[d
             return None, "invalid quantity or day"
         if type(held.entry_day) is not date or held.entry_day > trading_day:
             return None, "invalid entry day"
+        if held.entry_day == trading_day:
+            return None, "opened this session; no same-day round trips"
         if not isinstance(idea, dict) or idea.get("strategy") not in ("long_call", "long_put"):
             return None, "exit rules cover long single-leg ideas only"
         plan = idea.get("exit_plan")
@@ -90,6 +100,9 @@ def evaluate_exit(held: HeldOption, idea: dict, *, trading_day: date) -> tuple[d
         mark = None if held.mark is None else _dec(held.mark)
         if mark is not None and mark < 0:
             return None, "negative mark"
+        bid = None if held.bid is None else _dec(held.bid)
+        if bid is not None and bid <= 0:
+            bid = None
         close = None if held.underlying_close is None else _dec(held.underlying_close)
 
         reason, detail = None, None
@@ -124,10 +137,11 @@ def evaluate_exit(held: HeldOption, idea: dict, *, trading_day: date) -> tuple[d
                     reason, detail = "time_stop", f"held {held_sessions} sessions >= {sessions_limit}"
         if reason is None:
             return None, f"hold: {dte} DTE, mark {mark}, close {close}"
-        if mark is None:
-            return None, f"{reason} fired but no mark to price an exit; manual attention required"
+        if mark is None and bid is None:
+            return None, f"{reason} fired but no bid or mark to price an exit; manual attention required"
         return {"action": "close", "contract": held.contract, "quantity": held.quantity,
-                "limit_price": exit_limit(mark), "exit_reason": reason, "detail": detail,
+                "limit_price": exit_limit(mark, bid), "exit_reason": reason,
+                "detail": detail + (f"; priced at bid {bid}" if bid is not None else "; priced at 95% of mark"),
                 "trading_day": trading_day.isoformat()}, reason
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
         return None, "malformed idea or position"

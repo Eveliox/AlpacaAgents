@@ -69,7 +69,7 @@ class MarketDataClient:
         self._opener = opener if opener is not None else build_opener(ProxyHandler({}), _NoRedirect())
 
     def _get(self, path: str, query: dict) -> dict:
-        if not (re.fullmatch(r"/v3/snapshot/options/[A-Z]{1,6}", path)
+        if not (re.fullmatch(r"/v3/snapshot/options/[A-Z]{1,6}(/O:[A-Z]{1,6}[0-9]{6}[CP][0-9]{8})?", path)
                 or re.fullmatch(r"/v2/aggs/ticker/[A-Z]{1,6}/range/1/day/\d{4}-\d{2}-\d{2}/\d{4}-\d{2}-\d{2}", path)):
             raise MarketDataError("Market-data endpoint not allowed")
         if any(k.lower() in ("apikey", "api_key", "authorization") for k in query):
@@ -133,6 +133,13 @@ class MarketDataClient:
             # a truncated series is a complete indicator history.
             raise MarketDataError("Unexpected paginated daily bars; history incomplete")
         return payload
+
+    def option_contract(self, symbol: str, contract: str) -> dict:
+        """Single-contract snapshot (for pricing an exit on a held contract of any DTE)."""
+        symbol_checked(symbol)
+        if not isinstance(contract, str) or not re.fullmatch(r"[A-Z]{1,6}[0-9]{6}[CP][0-9]{8}", contract) or not contract.startswith(symbol):
+            raise MarketDataError("OCC contract of that underlying required")
+        return self._get(f"/v3/snapshot/options/{symbol}/O:{contract}", {})
 
     def option_chain(self, symbol: str, *, expiration_min: date, expiration_max: date,
                      max_pages: int = 20) -> tuple[dict, ...]:

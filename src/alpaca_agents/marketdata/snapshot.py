@@ -117,6 +117,32 @@ def normalize_chain(pages, *, symbol: str, now: datetime) -> tuple[tuple[OptionQ
     return tuple(quotes), tuple(issues), min(stamps)
 
 
+def contract_bid(client, *, symbol: str, contract: str, now: datetime) -> Decimal | None:
+    """Fresh two-sided realtime bid for a held contract, or None (never a stale or one-sided number).
+
+    Used to price exits: a sell limit at the bid is marketable by definition.
+    """
+    symbol_checked(symbol)
+    try:
+        row = client.option_contract(symbol, contract)["results"]
+        if row["details"]["ticker"] != f"O:{contract}" or row["underlying_asset"]["ticker"] != symbol:
+            return None
+        last_quote = row["last_quote"]
+        if last_quote["timeframe"] != "REAL-TIME":
+            return None
+        quote_at = _time(last_quote["last_updated"], 1_000_000_000)
+        if not timedelta(0) <= now.astimezone(timezone.utc) - quote_at <= MAX_QUOTE_AGE:
+            return None
+        if any(type(last_quote[k]) is not int or last_quote[k] <= 0 for k in ("bid_size", "ask_size")):
+            return None
+        bid, ask = _decimal(last_quote["bid"]), _decimal(last_quote["ask"])
+        if bid <= 0 or ask < bid or bid * 100 != (bid * 100).to_integral_value():
+            return None
+        return bid
+    except (MarketDataError, KeyError, TypeError, ValueError, InvalidOperation, OverflowError, AttributeError):
+        return None
+
+
 def load_snapshot(client, *, symbol: str, completed_session: date, now: datetime,
                   next_earnings: date | None = None, clock=None) -> SnapshotResult:
     symbol_checked(symbol)

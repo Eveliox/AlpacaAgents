@@ -407,11 +407,33 @@ a broker-observed terminal status.
 4. `underlying_target` - close through the idea's target
 5. `time_stop` - DTE <= `time_stop_dte`, or NYSE sessions held >= `time_stop_sessions`
 
-The exit is a **day limit sell at 95% of the mark** (floored at $0.01): a
-deliberately marketable limit for paper. Basis includes entry fees, so the
+The exit is a **day limit sell at the fresh NBBO bid** (marketable by
+definition in Alpaca paper), or at 95% of the broker mark when no fresh
+two-sided bid is available (floored at $0.01). A position is never exited on
+the session it was opened. Basis includes entry fees, so the
 premium stop is slightly conservative. Session counting uses the NYSE calendar. Missing close => underlying rules are
 skipped; missing mark => a fired rule is reported for manual attention but no
 order is priced.
+
+## Alpaca paper environment: what is and is not simulated
+
+From Alpaca's paper-trading documentation, and how each fact is handled:
+
+| Paper behaviour | Consequence here |
+|---|---|
+| Paper accounts are **margin** accounts (`multiplier` 2 or 4); a cash multiplier is not offered | Reconciliation blocks `NOT_CASH_ACCOUNT` until the owner creates `runtime/paper-margin-acknowledged` containing exactly `ACKNOWLEDGED`. With it, cash semantics are enforced **locally**: spendable cash = broker `cash` (never buying power) minus unsettled sale proceeds minus reservations; long-only; no same-day round trips. Unknown multipliers still block. |
+| Default balance is $100k (any amount on reset) | `capital_cap` ($2,000): spendable cash never exceeds cap minus open basis, whatever the broker shows. Create the paper account at $2,000 anyway so the dashboard matches. |
+| Fills only when **marketable** against NBBO; a sell limit fills only when limit <= best bid | Entries are priced at the ask by the scanner. Exits are priced **at the fresh NBBO bid** (single-contract Massive snapshot, realtime, two-sided, <= 120s old); if no such bid, 95% of the broker mark as a fallback. |
+| 10% of eligible fills are random partials | Every order is qty 1, so partials cannot occur; the ledger handles them anyway. |
+| Regulatory fees are **not** simulated | `FEE` activities never arrive in paper. `estimated_fees` are still reserved before entry (conservative); realized loss and the $40 breaker are premium-only in paper and will be slightly worse live. |
+| Dividends not simulated; borrow fees n/a | Irrelevant: long options only. |
+| Pre/after-hours available | Orders are `day` and only placed when the broker clock says `is_open`; options trade RTH only. |
+| Network problems, disconnects | One attempt per order, ever. Unknown outcomes stay `claimed` until matched by `client_order_id`; see `release-intent`. |
+| "Paper is only an approximation" | Slippage, queue position and market impact are absent. Treat paper results as an upper bound. |
+
+A margin paper account under $25k is subject to PDT rules, which is one more
+reason the exit manager refuses to close a position on the session it was
+opened.
 
 ## Controller cycle and runbook
 
@@ -450,9 +472,12 @@ disable. `--enable-playbook` without the marker is refused and logged.
 
 **First-run sequence** (none of this has been done yet):
 
-1. `python -m alpaca_agents.executor account` - confirm `multiplier == "1"`,
-   `options_trading_level >= 2`, status `ACTIVE`. If the paper account is a
-   margin account, stop: reconciliation will never pass and there is no override.
+1. Create a **$2,000** paper account in the Alpaca dashboard and generate keys
+   for it. `python -m alpaca_agents.executor account` - confirm
+   `options_trading_level >= 2`, status `ACTIVE`, note the `multiplier`.
+   It will be 2 or 4: read the paper-environment section above, then
+   `printf 'ACKNOWLEDGED
+' > runtime/paper-margin-acknowledged`.
 2. `python -m alpaca_agents.executor reconcile` - first run imports activities
    from account creation; expect `MARKET_CLOSED` outside RTH and nothing else.
 3. `python -m alpaca_agents.scanner --session <last session>` - shadow scan;

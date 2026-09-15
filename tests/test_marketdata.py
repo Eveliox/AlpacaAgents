@@ -81,6 +81,28 @@ class MarketDataTests(unittest.TestCase):
         self.opener = Opener(payloads)
         return MarketDataClient(DataCredentials("fake-data-secret"), audit=self.events.append, opener=self.opener)
 
+    def test_contract_bid_for_exit_pricing(self):
+        from decimal import Decimal
+        from alpaca_agents.marketdata.snapshot import contract_bid
+        contract = "IWM261023C00080000"
+        row = option_row()
+        good = {"status": "OK", "results": row}
+        self.assertEqual(contract_bid(self.client(good), symbol="IWM", contract=contract, now=NOW), Decimal("0.88"))
+        self.assertTrue(self.opener.requests[0].full_url.startswith("https://api.massive.com/v3/snapshot/options/IWM/O:" + contract))
+        stale = {"status": "OK", "results": {**row, "last_quote": {**row["last_quote"], "last_updated": ns(NOW - timedelta(minutes=10))}}}
+        one_sided = {"status": "OK", "results": {**row, "last_quote": {**row["last_quote"], "bid_size": 0}}}
+        delayed = {"status": "OK", "results": {**row, "last_quote": {**row["last_quote"], "timeframe": "DELAYED"}}}
+        wrong = {"status": "OK", "results": {**row, "details": {**row["details"], "ticker": "O:IWM261023C00081000"}}}
+        for payload in (stale, one_sided, delayed, wrong, {"status": "OK"}, {"results": None}):
+            with self.subTest(payload=str(payload)[:60]):
+                self.assertIsNone(contract_bid(self.client(payload), symbol="IWM", contract=contract, now=NOW))
+        from urllib.error import URLError
+        self.assertIsNone(contract_bid(self.client(URLError("down")), symbol="IWM", contract=contract, now=NOW))
+        with self.assertRaises(MarketDataError):
+            self.client(good).option_contract("IWM", "SPY261023C00080000")   # contract/underlying mismatch
+        with self.assertRaises(MarketDataError):
+            self.client(good).option_contract("IWM", "O:IWM261023C00080000")
+
     def test_full_data_to_shadow_scan(self):
         client = self.client(bars_payload(), page())
         result = load_snapshot(client, symbol="IWM", completed_session=SESSION, now=NOW)

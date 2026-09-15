@@ -231,10 +231,38 @@ class ReconcileTests(unittest.TestCase):
                 decision = evaluate({}, result.state, now=NOW, trading_day=DAY, kill_switch=False)
                 self.assertEqual(decision["reason"].split(":")[0], "STATE_UNAVAILABLE")
 
-    def test_margin_override_does_not_exist(self):
-        self.assertFalse(self.good(account=account(multiplier="4")).state.reconciled)
+    def test_margin_paper_account_requires_owner_acknowledgement(self):
+        blocked = self.good(account=account(multiplier="4"))
+        self.assertFalse(blocked.state.reconciled)
+        self.assertTrue(any(r.startswith("NOT_CASH_ACCOUNT") for r in blocked.reasons))
+        acked = self.good(account=account(multiplier="4"), config=ReconcileConfig(margin_paper_acknowledged=True))
+        self.assertTrue(acked.state.reconciled, acked.reasons)
+        self.assertTrue(acked.details["margin_account"])
+        # Even acknowledged, settled cash comes from `cash` minus unsettled, never buying power.
+        rich = account(multiplier="4", cash="1900.00", non_marginable_buying_power="9999", options_buying_power="9999")
+        self.assertEqual(self.good(account=rich, config=ReconcileConfig(margin_paper_acknowledged=True)).state.settled_cash, Decimal("1900.00"))
+        self.assertFalse(self.good(account=account(multiplier="3"), config=ReconcileConfig(margin_paper_acknowledged=True)).state.reconciled)
         with self.assertRaises(TypeError):
             ReconcileConfig(allow_margin_paper=True)
+
+    def test_capital_cap_bounds_spendable_cash(self):
+        big = account(cash="100000.00", non_marginable_buying_power="100000.00", options_buying_power="100000.00")
+        result = self.good(account=big)
+        self.assertTrue(result.state.reconciled)
+        self.assertEqual(result.state.settled_cash, Decimal("2000") - self.ledger.inventory()[0]["remaining_basis"])
+        self.assertEqual(result.details["open_basis"], "90")
+        self.assertEqual(self.good(account=big, config=ReconcileConfig(capital_cap=Decimal("50"))).state.settled_cash, Decimal("0"))
+
+    def test_config_from_runtime_marker(self):
+        from alpaca_agents.executor.reconcile import config_from_runtime
+        with tempfile.TemporaryDirectory() as tmp:
+            rt = Path(tmp)
+            self.assertFalse(config_from_runtime(rt).margin_paper_acknowledged)
+            (rt / "paper-margin-acknowledged").write_text("acknowledged")
+            self.assertFalse(config_from_runtime(rt).margin_paper_acknowledged)
+            (rt / "paper-margin-acknowledged").write_text("ACKNOWLEDGED\n")
+            self.assertTrue(config_from_runtime(rt).margin_paper_acknowledged)
+            self.assertEqual(config_from_runtime(rt).capital_cap, Decimal("2000"))
 
     def test_matched_open_order_counts_as_pending_and_reconciles(self):
         ours = "paper-" + "b" * 32

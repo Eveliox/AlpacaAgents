@@ -104,8 +104,21 @@ class ExitRuleTests(unittest.TestCase):
         decision, note = evaluate_exit(held(underlying_close=Decimal("100"), bars=rising), idea(exit_plan=plan), trading_day=DAY)
         self.assertEqual(note, "underlying_stop")
 
+    def test_same_day_round_trip_refused_and_bid_pricing(self):
+        decision, note = evaluate_exit(held(entry_day=DAY, mark=Decimal("0.10")), idea(), trading_day=DAY)
+        self.assertIsNone(decision)
+        self.assertIn("same-day", note)
+        decision, _ = evaluate_exit(held(mark=Decimal("0.40"), bid=Decimal("0.37")), idea(), trading_day=DAY)
+        self.assertEqual(decision["limit_price"], "0.37")
+        self.assertIn("priced at bid", decision["detail"])
+        decision, _ = evaluate_exit(held(mark=None, bid=Decimal("0.37")), idea(underlying_close=None), trading_day=date(2026, 9, 25))
+        self.assertEqual((decision["exit_reason"], decision["limit_price"]), ("time_stop", "0.37"))   # bid alone can price
+        decision, _ = evaluate_exit(held(mark=Decimal("0.40"), bid=Decimal("0")), idea(), trading_day=DAY)
+        self.assertEqual(decision["limit_price"], "0.38")   # zero bid -> fallback
+
     def test_helpers(self):
         self.assertEqual(exit_limit(Decimal("0.80")), "0.76")
+        self.assertEqual(exit_limit(Decimal("0.80"), Decimal("0.79")), "0.79")
         self.assertEqual(exit_limit(Decimal("0.01")), "0.01")
         self.assertEqual(exit_limit(Decimal("0.005")), "0.01")
         self.assertEqual(weekdays_between(date(2026, 9, 11), date(2026, 9, 14)), 1)   # Fri -> Mon

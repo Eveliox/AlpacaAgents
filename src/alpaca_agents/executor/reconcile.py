@@ -8,7 +8,11 @@ The four verifications that used to be hard-blocked are now real checks:
 - provenance: broker open orders <-> journal intents matched on client_order_id
 - coverage:   contiguous exhausted import windows from account creation to now
 - settlement: conservative unsettled-proceeds bound computed from the ledger
-- cash acct:  multiplier == "1", no override
+- cash acct:  multiplier == "1", OR the owner has acknowledged (marker file,
+              read by the caller into ReconcileConfig) that the PAPER account is
+              a margin account and cash semantics are enforced here instead:
+              settled cash from `cash` minus unsettled proceeds, never buying
+              power; long-only; capital_cap on spendable cash.
 """
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -28,6 +32,8 @@ class ReconcileConfig:
     history_lag_limit: timedelta = timedelta(minutes=15)
     clock_skew_limit: timedelta = timedelta(seconds=60)
     unsettled_calendar_days: int = 4       # T+1 plus weekend/holiday slack; deliberately over-conservative
+    capital_cap: Decimal = Decimal("2000") # spendable cash never exceeds cap minus open basis, whatever the broker shows
+    margin_paper_acknowledged: bool = False  # set only from runtime/paper-margin-acknowledged == ACKNOWLEDGED
 
 
 @dataclass(frozen=True)
@@ -109,8 +115,12 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
         details["options_trading_level"] = level
         multiplier = str(account.get("multiplier"))
         details["multiplier"] = multiplier
-        if multiplier != "1":
-            reasons.append(f"NOT_CASH_ACCOUNT: multiplier={multiplier}")
+        if multiplier not in ("1", "2", "4"):
+            reasons.append(f"UNKNOWN_MULTIPLIER: {multiplier}")
+        elif multiplier != "1":
+            details["margin_account"] = True
+            if config.margin_paper_acknowledged is not True:
+                reasons.append(f"NOT_CASH_ACCOUNT: multiplier={multiplier}; paper margin account not acknowledged")
         candidates = [_dec(account[k]) for k in ("cash", "non_marginable_buying_power", "options_buying_power") if k in account]
         if not candidates or "cash" not in account:
             raise ValueError
@@ -222,6 +232,13 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
         unsettled = broker_cash
     settled = broker_cash - unsettled
     details["unsettled_proceeds_bound"] = str(unsettled)
+    # Capital cap: the paper balance (default $100k) is not the owner's risk
+    # budget. Spendable cash is capped at cap minus what is already deployed.
+    open_basis = sum((Decimal(str(row.get("remaining_basis", 0))) for row in inventory), Decimal(0))
+    capped = config.capital_cap - open_basis
+    details["capital_cap"] = str(config.capital_cap)
+    details["open_basis"] = str(open_basis)
+    settled = min(settled, capped)
     if settled < 0:
         settled = Decimal(0)
     details["settled_cash_bound"] = str(settled)
@@ -230,6 +247,19 @@ def reconcile(*, account: dict, positions: list, open_orders: list, clock: dict,
                       pending_entries=pending, daily_realized_loss=daily_loss, settled_cash=settled,
                       order_attempts=tuple(order_attempts), breaker_tripped=breaker, reconciled=not reasons)
     return Reconciliation(state, tuple(reasons), details)
+
+
+MARGIN_ACK_TOKEN = "ACKNOWLEDGED"
+
+
+def config_from_runtime(runtime, base: ReconcileConfig = ReconcileConfig()) -> ReconcileConfig:
+    """Apply owner marker files: runtime/paper-margin-acknowledged == ACKNOWLEDGED."""
+    from dataclasses import replace
+    try:
+        acknowledged = (runtime / "paper-margin-acknowledged").read_text(encoding="utf-8").strip() == MARGIN_ACK_TOKEN
+    except (OSError, UnicodeError):
+        acknowledged = False
+    return replace(base, margin_paper_acknowledged=acknowledged)
 
 
 def build_risk_state(client, ledger, store, journal=None, *, now: datetime, order_attempts=(),
