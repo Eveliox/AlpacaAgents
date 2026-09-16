@@ -6,7 +6,7 @@ import shutil
 import tempfile
 import unittest
 
-from alpaca_agents.dashboard import build, collect, render
+from alpaca_agents.dashboard import AGENTS, build, collect, render
 from alpaca_agents.executor.fills import FillLedger, OptionFill
 from alpaca_agents.executor.orders import OrderJournal
 from alpaca_agents.notify import Notifier
@@ -50,6 +50,56 @@ class DashboardFromLifecycleTests(ControllerTests):
             self.assertIn(needle, page, needle)
         self.assertNotIn("<script", page)
         self.assertNotIn("test-secret", page)
+
+
+class DashboardAgentTests(unittest.TestCase):
+    def test_named_roles_have_accessible_offline_filters_and_owned_panels(self):
+        from html.parser import HTMLParser
+
+        class Page(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.inputs, self.labels, self.sections = [], {}, []
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "input":
+                    self.inputs.append(attrs)
+                elif tag == "label":
+                    self.labels[attrs["for"]] = attrs
+                elif tag == "section":
+                    self.sections.append(attrs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = render(collect(Path(tmp), now=NOW))
+        parsed = Page()
+        parsed.feed(page)
+        self.assertEqual(len(parsed.inputs), 5)
+        self.assertEqual([r["id"] for r in parsed.inputs if "checked" in r], ["agent-all"])
+        for item in parsed.inputs:
+            self.assertEqual((item["type"], item["name"]), ("radio", "agent"))
+            self.assertIn(item["id"], parsed.labels)
+        self.assertEqual(len([s for s in parsed.sections if "data-agent" not in s]), 1)  # global status stays visible
+        for key, name, role, _ in AGENTS:
+            self.assertIn(name, page)
+            self.assertIn(role.replace("&", "&amp;"), page)
+            self.assertGreaterEqual(sum(s.get("data-agent") == key for s in parsed.sections), 2)
+            self.assertIn(f'#agent-{key}:checked ~ main [data-agent]:not([data-agent="{key}"]){{display:none}}', page)
+        for agent, title in (("star", "Playbooks"), ("moon", "Risk checks"), ("houston", "Order intents"),
+                             ("astra", "Notifications")):
+            self.assertIn(f'<span class="agent-owner">{agent.title()}</span><h2>{title}</h2>', page)
+        self.assertIn("No controller reconciliation snapshot yet", page)
+        self.assertNotIn("<script", page)
+        self.assertNotIn("<form", page)
+
+    def test_risk_blockers_are_escaped_in_moon_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = collect(Path(tmp), now=NOW)
+            data["cycles"] = [{"stages": {"reconcile": {"ok": False, "reasons": ["<unsafe>"]}}}]
+            page = render(data)
+            self.assertIn("Latest reconciliation blockers", page)
+            self.assertIn("&lt;unsafe&gt;", page)
+            self.assertNotIn("<unsafe>", page)
 
 
 class DashboardEscapingTests(unittest.TestCase):

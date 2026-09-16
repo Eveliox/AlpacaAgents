@@ -18,6 +18,14 @@ from .executor.eastern import eastern_date
 from .gateway import control_mode
 from .scanner.scan import PLAYBOOKS
 
+# Display identities only: these do not change playbook IDs or trading permissions.
+AGENTS = (
+    ("houston", "Houston", "Executor", "Orders, positions and the exclusive broker boundary."),
+    ("star", "Star", "Scanner", "Market-data ideas and playbooks. No broker access."),
+    ("moon", "Moon", "Rules Engine", "Deterministic risk validation. No I/O or LLM calls."),
+    ("astra", "Astra", "Dashboard & Notifications", "Read-only monitoring, cycle reports and alerts."),
+)
+
 CSS = """
 :root{--bg:#1d1f22;--panel:#26292e;--line:#34383f;--fg:#d9d6cf;--dim:#8d8a82;--gold:#c9a24d;--red:#c96b5a;--green:#7fa96b}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
@@ -32,7 +40,28 @@ th{color:var(--dim);font-weight:normal}td.num{text-align:right;font-variant-nume
 .ok{color:var(--green);border-color:var(--green)}.bad{color:var(--red);border-color:var(--red)}.warn{color:var(--gold);border-color:var(--gold)}
 .dim{color:var(--dim)}dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 14px;margin:0}dt{color:var(--dim)}dd{margin:0}
 .reasons li{color:var(--red)}ul{margin:4px 0 0 16px;padding:0}footer{padding:10px 20px;color:var(--dim);border-top:1px solid var(--line)}
+.agent-picker{border:0;margin:0;padding:14px 20px 0;min-width:0}
+.agent-picker legend{padding-top:12px;color:var(--dim)}
+.agent-picker>main{padding:14px 0}
+.agent-filter{position:absolute;width:1px;height:1px;opacity:0}
+.agent-tab{display:inline-block;margin:0 6px 8px 0;padding:8px 14px;border:1px solid var(--line);border-radius:4px;cursor:pointer}
+.agent-filter:checked+label{background:var(--gold);color:var(--bg);border-color:var(--gold)}
+.agent-filter:focus-visible+label{outline:2px solid var(--fg);outline-offset:3px}
+.agent-owner{display:block;font-size:10px;letter-spacing:.12em;color:var(--dim);margin-bottom:5px}
+.agent-summary h2{font-size:15px;text-transform:none}.agent-summary p{margin:4px 0}
+@media(max-width:480px){main{grid-template-columns:minmax(0,1fr)}header{flex-wrap:wrap;gap:8px}}
 """
+# CSS-only radio filters keep the file self-contained and usable offline.
+CSS += "\n".join(
+    f'#agent-{key}:checked ~ main [data-agent]:not([data-agent="{key}"]){{display:none}}'
+    for key, _, _, _ in AGENTS
+)
+
+
+def _panel(agent: str, title: str, body: str, *, wide=False) -> str:
+    name = next(name for key, name, _, _ in AGENTS if key == agent)
+    return (f'<section data-agent="{agent}" class="{"wide" if wide else ""}">'
+            f'<span class="agent-owner">{name}</span><h2>{_e(title)}</h2>{body}</section>')
 
 
 def _e(value) -> str:
@@ -175,21 +204,22 @@ def render(data: dict) -> str:
     playbooks = _table(["playbook", "approved", "shadow ideas"],
                        [(name, Html(_pill("APPROVED", "ok") if d["approvals"][name] else _pill("shadow only", "dim")),
                          d["shadow_counts"][name]) for name in PLAYBOOKS], numeric={2})
-    playbooks = f'<section><h2>Playbooks</h2>{playbooks}<p class="dim">shadow scan: {_e(d["shadow"].get("generated_at", "none"))}</p></section>'
+    playbooks = _panel("star", "Playbooks", playbooks +
+                       f'<p class="dim">shadow scan: {_e(d["shadow"].get("generated_at", "none"))}</p>')
 
     positions = _table(["contract", "qty", "basis", "opened"],
                        [(r["contract"], r["qty"], f"${Decimal(r['basis']) / 1_000_000:.2f}", r["opened"]) for r in d["inventory"]], numeric={1, 2})
-    positions = f"<section><h2>Open positions</h2>{positions}</section>"
+    positions = _panel("houston", "Open positions", positions)
 
     intents = _table(["time", "kind", "status", "contract", "cost", "broker", "reason"],
                      [(t(r["created_at"]), r["kind"], Html(_pill(r["status"], "ok" if r["status"].startswith(("resolved", "claimed")) else "warn" if r["status"] == "reserved" else "dim")),
                        r["contract"] or r["symbol"], r["cost"], r["broker_order_id"] or "", r["reason"]) for r in d["intents"]])
-    intents = f'<section class="wide"><h2>Order intents</h2>{intents}</section>'
+    intents = _panel("houston", "Order intents", intents, wide=True)
 
     closed = _table(["day", "contract", "pnl"],
                     [(r["trading_day"], r["contract"], Html(f'<span class="{"ok" if r["pnl_units"] >= 0 else "bad"}">${Decimal(r["pnl_units"]) / 1_000_000:.2f}</span>'))
                      for r in d["closed"]], numeric={2})
-    closed = f"<section><h2>Closed trades</h2>{closed}</section>"
+    closed = _panel("houston", "Closed trades", closed)
 
     def stage_summary(c):
         s = c.get("stages", {})
@@ -210,23 +240,43 @@ def render(data: dict) -> str:
 
     cycles = _table(["finished", "mode", "submit", "summary"],
                     [(t(c.get("finished_at")), c.get("control_mode"), "yes" if c.get("submit") else "dry", stage_summary(c)) for c in d["cycles"]])
-    cycles = f'<section class="wide"><h2>Cycles</h2>{cycles}</section>'
+    cycles = _panel("astra", "Cycles", cycles, wide=True)
 
     notes = _table(["time", "level", "title"],
                    [(t(n.get("timestamp")), Html(_pill(n.get("level"), {"info": "dim", "warning": "warn"}.get(n.get("level"), "bad"))), n.get("title")) for n in d["notifications"]])
-    notes = f"<section><h2>Notifications</h2>{notes}</section>"
+    notes = _panel("astra", "Notifications", notes)
 
     events = _table(["time", "event"], [(t(e["timestamp"]), e["event"]) for e in d["order_events"]])
-    events = f"<section><h2>Journal events</h2>{events}</section>"
+    events = _panel("houston", "Journal events", events)
 
     traces = _table(["started", "method", "path", "status", "outcome"],
                     [(t(x["started_at"]), x["method"], x["path"], x["status"], x["outcome"]) for x in d["traces"]])
-    traces = f"<section><h2>Broker requests</h2>{traces}</section>"
+    traces = _panel("houston", "Broker requests", traces)
+
+    risk = _panel("moon", "Risk checks", """<dl>
+<dt>maximum entry risk</dt><dd>$100 including estimated fees</dd>
+<dt>position limit</dt><dd>2 concurrent positions</dd>
+<dt>daily loss breaker</dt><dd>$40 cumulative realized losses; wins do not offset</dd>
+</dl><p class="dim">The breaker blocks new entries, not losses on existing positions.
+These are system-wide limits, not separate budgets per agent.</p>""" +
+                  ('<h2>Latest reconciliation blockers</h2><ul class="reasons">' +
+                   ''.join(f'<li>{_e(r)}</li>' for r in rec.get("reasons", [])) + '</ul>'
+                   if rec.get("reasons") else
+                   '<p class="dim">No blockers reported in the latest cycle.</p>' if rec else
+                   '<p class="dim">No controller reconciliation snapshot yet.</p>'))
+    filters = '<input class="agent-filter" type="radio" name="agent" id="agent-all" checked><label class="agent-tab" for="agent-all">All agents</label>'
+    summaries = []
+    for key, name, role, description in AGENTS:
+        filters += (f'<input class="agent-filter" type="radio" name="agent" id="agent-{key}">'
+                    f'<label class="agent-tab" for="agent-{key}">{name}</label>')
+        summaries.append(f'<section class="agent-summary" data-agent="{key}"><h2>{name}</h2>'
+                         f'<p>{_e(role)}</p><p class="dim">{_e(description)}</p></section>')
 
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>AlpacaAgent - paper</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"><style>{CSS}</style></head><body>
 <header><h1>ALPACA AGENT</h1><span class="meta">paper only</span><span class="meta">rendered {_e(d['now'].astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))} UTC</span></header>
-<main>{status}{playbooks}{positions}{closed}{intents}{cycles}{notes}{events}{traces}</main>
+<fieldset class="agent-picker"><legend>Four roles, one paper-trading system. Filter the view; trading settings stay unchanged.</legend>
+{filters}<main>{status}{''.join(summaries)}{playbooks}{risk}{positions}{closed}{intents}{cycles}{notes}{events}{traces}</main></fieldset>
 <footer>Static snapshot. Regenerate with <code>python -m alpaca_agents.dashboard</code>. Nothing on this page can place an order.</footer>
 </body></html>"""
 

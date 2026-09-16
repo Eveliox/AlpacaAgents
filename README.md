@@ -415,6 +415,30 @@ premium stop is slightly conservative. Session counting uses the NYSE calendar. 
 skipped; missing mark => a fired rule is reported for manual attention but no
 order is priced.
 
+## Named agents and dashboard filters
+
+The four architectural roles have display names (not separate trading accounts or playbooks):
+
+| Name | Role | Dashboard view |
+|---|---|---|
+| Houston | Executor | Positions, trades, intents, journal events, broker requests |
+| Star | Scanner | Playbook approvals and shadow idea counts |
+| Moon | Rules Engine | System-wide risk limits and latest reconciliation blockers |
+| Astra | Dashboard / Notifications | Cycle reports and notifications |
+
+Generate and open the dashboard in PowerShell:
+
+```powershell
+python -m alpaca_agents.dashboard
+Start-Process runtime\dashboard.html
+```
+
+Choose **All agents / Houston / Star / Moon / Astra** to filter panels. Global
+status stays visible in every view. The filters work offline without JavaScript;
+use Tab and arrow keys to navigate them with a keyboard. Filtering does not arm
+trading, approve playbooks, or allocate separate budgets. This remains a static
+snapshot: regenerate it for updated data, then refresh the browser.
+
 ## Alpaca paper environment: what is and is not simulated
 
 From Alpaca's paper-trading documentation, and how each fact is handled:
