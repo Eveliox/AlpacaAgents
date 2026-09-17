@@ -1,4 +1,4 @@
-"""Read-only, offline paper workspace. No broker calls, JavaScript or secrets.
+"""Read-only, offline paper workspace. Local JS chat; no broker calls or secrets.
 
 Reads local runtime reports and journals; writes one self-contained HTML file.
 Names are display roles, not independent traders. Data is always HTML-escaped.
@@ -13,6 +13,7 @@ import sqlite3
 import tempfile
 
 from .dashboard_style import CSS as BASE_CSS
+from .dashboard_chat import ART, avatar_uri, render_chat
 from .executor.eastern import eastern_date
 from .gateway import control_mode
 from .scanner.scan import PLAYBOOKS
@@ -313,7 +314,12 @@ def render(d: dict) -> str:
         "astra": "Local snapshot · not a live feed",
     }
     for key, name, role, description in AGENTS:
-        panels.append(f'<section class="agent-summary" data-agent="{key}"><span class="eyebrow">{_e(role)}</span><h2>{name}</h2><p class="role">{_e(agent_states[key])}</p><p>{_e(description)}</p></section>')
+        panels.append(f'<section class="agent-summary agent-{key}" data-agent="{key}">'
+                      f'<div class="avatar-stage"><img src="{avatar_uri(key)}" alt="{name} · {ART[key]}" width="110" height="124"></div>'
+                      f'<span class="eyebrow">{_e(role)}</span><h2>{name}</h2><p class="role">{_e(agent_states[key])}</p><p>{_e(description)}</p>'
+                      f'<button class="talk-button" type="button" data-chat-agent="{key}" disabled>Talk to {name} <span aria-hidden="true">↗</span></button></section>')
+    crew = ''.join(panels)
+    panels = []
 
     reasons = _list(rec.get("reasons"))
     risk = '<dl><dt>Maximum entry risk</dt><dd>$100 including estimated fees</dd><dt>Concurrent positions</dt><dd>2</dd><dt>Daily loss breaker</dt><dd>$40 cumulative losses; wins do not offset</dd></dl>'
@@ -378,11 +384,13 @@ def render(d: dict) -> str:
     filters = '<input class="agent-filter" type="radio" name="agent" id="agent-all" checked><label class="agent-tab" for="agent-all">All agents</label>'
     for key, name, _, _ in AGENTS:
         filters += f'<input class="agent-filter" type="radio" name="agent" id="agent-{key}"><label class="agent-tab" for="agent-{key}">{name}</label>'
+    chat, scripts, csp = render_chat(d, AGENTS)
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Mission Control · AlpacaAgent paper</title>
+<meta http-equiv="Content-Security-Policy" content="{_e(csp)}">
 <meta name="viewport" content="width=device-width,initial-scale=1"><style>{CSS}</style></head><body>
-<header><div class="brand"><div class="brand-mark" aria-hidden="true">✦</div><div><h1>Mission Control</h1><p>Houston / Star / Moon / Astra</p></div></div><div class="meta">{_pill('PAPER ONLY · READ-ONLY', 'warn')}<p>Rendered {_e(t(d['now']))}</p></div></header>
-<fieldset class="agent-picker"><legend>Choose a workspace. Filters change the view, never trading permissions.</legend>{filters}<main>{status}{''.join(panels)}</main></fieldset>
-<footer>Local snapshot · no broker requests from this page · no live-money orders. Regenerate with <code>python -m alpaca_agents.dashboard</code>, then refresh your browser. No API keys belong on this page.</footer></body></html>'''
+<header><div class="brand"><div class="brand-mark" aria-hidden="true">✦</div><div><span class="eyebrow">Your personal trading workspace</span><h1>Mission Control</h1><p>Research with your crew. Keep risk in view.</p></div></div><div class="header-actions"><a class="chat-jump" href="#agent-chat">Talk to the crew ↗</a><div class="meta">{_pill('PAPER ONLY · READ-ONLY', 'warn')}<p>Rendered {_e(t(d['now']))}</p></div></div></header>
+<div class="workspace"><fieldset class="agent-picker"><legend>Choose a workspace. Filters change the view, never trading permissions.</legend>{filters}<main>{crew}{status}{''.join(panels)}</main></fieldset>{chat}</div>
+<footer>Local snapshot · no broker requests from this page · no live-money orders. Regenerate with <code>python -m alpaca_agents.dashboard</code>, then refresh your browser. No API keys belong on this page.</footer>{scripts}</body></html>'''
 
 
 def build(runtime: Path, output: Path, *, now: datetime | None = None) -> Path:

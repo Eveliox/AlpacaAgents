@@ -419,12 +419,15 @@ order is priced.
 
 The four architectural roles have display names (not separate trading accounts or playbooks):
 
-| Name | Role | Dashboard view |
-|---|---|---|
-| Houston | Executor | Positions, trades, intents, journal events, broker requests |
-| Star | Scanner | Playbook approvals, scan errors, shadow ideas and historical research |
-| Moon | Rules Engine | System-wide risk limits and latest reconciliation blockers |
-| Astra | Dashboard / Notifications | Cycle reports and notifications |
+| Name | Role | Avatar | Dashboard view |
+|---|---|---|---|
+| Houston | Executor | Wallet | Positions, trades, intents, journal events, broker requests |
+| Star | Scanner | Spark/bomb | Playbook approvals, scan errors, shadow ideas and historical research |
+| Moon | Rules Engine | Ghost | System-wide risk limits and latest reconciliation blockers |
+| Astra | Dashboard / Notifications | Vinyl record | Cycle reports and notifications |
+
+The supplied originals are preserved in `artwork/originals/`. Optimized avatars
+are packaged and embedded in the generated HTML (no remote image services).
 
 **Easiest on Windows:** double-click `Open-Dashboard.cmd` in the project folder.
 It rebuilds the dashboard from local records and opens it. It does not need API
@@ -444,12 +447,48 @@ use Tab and arrow keys to navigate them with a keyboard. Filtering does not arm
 trading, approve playbooks, or allocate separate budgets. This remains a static
 snapshot: regenerate it for updated data, then refresh the browser.
 
+### Talk to your crew
+
+Click **Talk to Houston / Star / Moon / Astra** on a character card, or use the
+agent dropdown in the chat panel. On a phone, **Talk to the crew** at the top
+jumps directly to chat. Filters also switch the conversation persona.
+
+Try:
+- Houston: **Show my positions**, **Why aren't we trading?**
+- Star: **Compare my backtests**, **Explain QQQ results**, **Why are scans failing?**
+- Moon: **Explain my risk limits**, **Can I trust these results?**
+- Astra: **Give me a briefing**, **What should I do next?**
+
+**This is a local, rule-based snapshot guide, not generative AI.** Each answer
+selects a supported topic and cites saved runtime sources or system guidance.
+These are display personas in Layer 4, not conversational access to the actual
+executor or rules engine. Unsupported questions return a capabilities message;
+the guide does not invent market facts or forecasts.
+
+- No API keys or subscription are needed for chat. It makes **no network calls**.
+- It cannot place/cancel orders, approve playbooks, change limits or run shell commands.
+- Messages stay in browser memory, with a separate thread per agent (latest
+  20 exchanges each). **Clear chat** clears all threads; refreshing starts over.
+- Suspected credentials/long tokens are masked, but this is only a precaution:
+  **never paste secrets** into chat.
+- Replies are snapshot-based, not live. The chat snapshot-age label advances;
+  it does not fetch new records. Rebuild the dashboard to update the sources.
+- JavaScript enables chat and card interactions. With JS disabled, chat is
+  inert and the read-only dashboard and CSS filters still work.
+- A Content Security Policy permits only the bundled script, blocks network
+  connections and form navigation, and prevents remote code/assets from loading.
+
+An open-ended LLM-backed conversation is **not connected**. If added later,
+keep provider credentials on a local backend, limit it to sanitized read-only
+snapshots, and never give it broker tools or a rules-engine override.
+
 ### Mission Control: recommended routine
 
 1. **Overview first.** Read “What to do next,” the control mode, snapshot age,
    daily cumulative loss and outstanding intents. Missing/unreadable journals
    show **Unknown**, not zero. A recent snapshot is not proof a controller is
-   running; age is computed at render time and does not tick in the browser.
+   running. Cycle freshness is evaluated at render time; the chat's clock only
+   shows how old the rendered page is, not whether new cycles have occurred.
 2. **Star for research.** Scan errors distinguish missing access (e.g. options
    HTTP 403) from no setups. `runtime/bt-*.json` reports appear in Research lab
    automatically. These are underlying-price R results, **not option P&L**.
@@ -471,6 +510,21 @@ python -m alpaca_agents.controller --runtime runtime --dashboard
 A disabled control mode skips scanning and exits. A shadow scan is a separate
 command and requires options-data access. Refreshing the browser alone never
 fetches broker data. No web server or additional UI dependencies are required.
+
+Developer checks for the interactive layer:
+
+```sh
+python -m unittest discover -s tests
+node --test tests/test_dashboard_chat.cjs
+# Optional: Node 22 and Chrome/Chromium; set CHROME_PATH if needed.
+python -m alpaca_agents.dashboard
+node tests/dashboard_browser.cjs
+```
+
+The browser smoke test uses an isolated temporary profile and checks avatars,
+filters, keyboard submission, chat safety, in-memory threads, mobile layout,
+no external requests and the no-JavaScript fallback. It writes screenshots
+beside the generated HTML; Node and Chrome are test tools, not app dependencies.
 
 ## Alpaca paper environment: what is and is not simulated
 

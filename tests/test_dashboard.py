@@ -48,7 +48,7 @@ class DashboardFromLifecycleTests(ControllerTests):
         for needle in ("ARMED_PAPER", "$52.00 / $40.00", "latched", "IWM261016C00205000", "resolved:filled",
                        "Exit premium_stop", "POST", "/v2/orders", "APPROVED", "shadow only", "reconciled"):
             self.assertIn(needle, page, needle)
-        self.assertNotIn("<script", page)
+        self.assertEqual(page.count("<script"), 2)  # static code + escaped JSON context only
         self.assertNotIn("test-secret", page)
 
 
@@ -89,8 +89,9 @@ class DashboardAgentTests(unittest.TestCase):
                              ("astra", "Notifications")):
             self.assertIn(f'<span class="agent-owner">{agent.title()}</span><h2>{title}</h2>', page)
         self.assertIn("No controller reconciliation snapshot yet", page)
-        self.assertNotIn("<script", page)
-        self.assertNotIn("<form", page)
+        self.assertEqual(page.count("<script"), 2)
+        self.assertIn('form-action &#x27;none&#x27;', page)
+        self.assertIn('id="chat-form"', page)
 
     def test_risk_blockers_are_escaped_in_moon_view(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -192,7 +193,7 @@ class DashboardWorkspaceTests(unittest.TestCase):
             page = render(self.data(root))
         self.assertNotIn(hostile, page)
         self.assertIn("&lt;img", page)
-        self.assertNotIn("<script", page)
+        self.assertEqual(page.count("<script"), 2)
 
     def test_build_only_writes_output_and_is_deterministic(self):
         with tempfile.TemporaryDirectory() as tmp:

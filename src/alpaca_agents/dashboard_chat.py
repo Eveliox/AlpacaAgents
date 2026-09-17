@@ -1,0 +1,193 @@
+"""Layer 4's offline conversation guide, not an LLM or a trading agent.
+
+Only curated snapshot fields enter the browser. No credentials, account IDs,
+order bodies, network access, broker actions or persistent chat storage.
+"""
+import base64
+from functools import lru_cache
+import hashlib
+import html
+from importlib.resources import files
+import json
+from decimal import Decimal, InvalidOperation
+
+ART = {
+    "houston": "Wallet character",
+    "star": "Spark character",
+    "moon": "Ghost character",
+    "astra": "Vinyl character",
+}
+PROMPTS = {
+    "houston": ["Show my positions", "Why aren't we trading?", "What happened with orders?"],
+    "star": ["Compare my backtests", "Explain QQQ results", "Why are scans failing?"],
+    "moon": ["Explain my risk limits", "Can I trust these results?", "What does DISABLED mean?"],
+    "astra": ["Give me a briefing", "What should I do next?", "Show recent notifications"],
+}
+
+
+@lru_cache(maxsize=4)
+def avatar_uri(agent):
+    if agent not in ART:
+        raise ValueError("Unknown display agent")
+    raw = files("alpaca_agents").joinpath("assets", f"{agent}.png").read_bytes()
+    return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+
+
+def _obj(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _rows(value):
+    return [r for r in value if isinstance(r, dict)] if isinstance(value, list) else []
+
+
+def _decimal(value, places=2):
+    try:
+        number = Decimal(str(value))
+        return f"{number:.{places}f}" if number.is_finite() and not isinstance(value, bool) else "unknown"
+    except (InvalidOperation, ValueError):
+        return "unknown"
+
+
+def _reply(text, source):
+    return {"text": text, "source": source}
+
+
+def conversation_data(d, agents):
+    """Precompute auditable answers; JS only selects a topic, never invents facts."""
+    last = d["cycles"][0] if d["cycles"] else {}
+    rec = _obj(_obj(last.get("stages")).get("reconcile"))
+    cycle_source = "cycles.jsonl · last recorded cycle " + str(last.get("finished_at") or "not available")
+    rec_text = "No controller reconciliation snapshot has been saved. Standalone reconcile output does not populate cycle history."
+    if rec:
+        rec_text = "The saved controller check passed." if rec.get("ok") is True else "The saved controller check was blocked."
+        rec_text += " This is a past check, not proof of current readiness."
+    mode = d["control"]
+    net = "$" + _decimal(d["daily_net"]) if d["ledger_known"] else "unknown"
+    loss = "$" + _decimal(d["daily_loss"]) if d["ledger_known"] else "unknown"
+    count = str(len(d["inventory"])) if d["ledger_known"] else "unknown"
+    outstanding = str(len(d["live"])) if d["orders_known"] else "unknown"
+    briefing = (f"Saved workspace: {mode}. Recorded positions: {count}. Outstanding intents: {outstanding}.\n"
+                f"Recorded daily net: {net}; cumulative daily loss: {loss}.\n{rec_text}\n"
+                "I cannot see whether a controller is running or whether the market is open right now. Rebuild the dashboard after new cycles to update my sources.")
+    controls = (f"Your control file currently reads {mode}.\n"
+                "DISABLED: no automatic entries OR exits.\nEXITS_ONLY: no new entries; exits require a running controller, --submit and valid checks.\n"
+                "ARMED_PAPER: permits paper entries/exits but still requires checks, playbook enablement and --submit.\n"
+                "A filter or chat message never changes these settings. If positions are open, do not assume this dashboard manages them.")
+    blockers = [str(r) for r in rec.get("reasons", [])] if isinstance(rec.get("reasons"), list) else []
+    if rec.get("error"):
+        blockers.append(str(rec["error"]))
+    if mode == "DISABLED":
+        blockers.insert(0, "Trading control is DISABLED (entries and exits).")
+    if last and last.get("submit") is not True:
+        blockers.append("Last controller cycle ran without submission enabled.")
+    if not last:
+        blockers.append("No controller cycle recorded; broker readiness is unknown here.")
+    if d["latched"]:
+        blockers.append("The daily loss breaker is latched.")
+    blockers.extend(str(i) for i in d["issues"][:5])
+    if not any(d["approvals"].values()):
+        blockers.append("No playbook approval markers are present.")
+    errors = _rows(d["shadow"].get("errors"))
+    blockers.extend(f"Scan {r.get('symbol', '?')}: {r.get('reason', 'unknown error')}" for r in errors[:3])
+    blocked_text = "Recorded blockers / missing prerequisites:\n" + "\n".join("• " + b for b in blockers) if blockers else "No blocker is recorded in these saved sources. That is not an authorization or a guarantee that all prerequisites are met."
+    blocked_text += "\nDo not bypass a check or repeat an uncertain order. Reconcile and inspect the broker first."
+
+    if d["ledger_known"]:
+        position_text = "No open positions recorded in the local ledger. Confirm with a fresh reconciliation before acting."
+        if d["inventory"]:
+            position_text = "Local positions (basis, not market value):\n" + "\n".join(
+                f"• {r.get('contract')}: {r.get('qty')} contract(s), basis ${_decimal(Decimal(str(r['basis'])) / 1_000_000)}, opened {r.get('opened')}"
+                for r in d["inventory"][:10])
+        position_text += "\nI have no live option marks or unrealized P&L."
+    else:
+        position_text = "The position ledger is missing or unreadable. Unknown is not zero. Check broker records and reconcile."
+    order_text = f"Outstanding intents: {outstanding}. Claimed means awaiting resolution, not necessarily filled.\n"
+    order_text += "\n".join(f"• {r.get('kind')} {r.get('contract') or r.get('symbol')}: {r.get('status')}" for r in d["intents"][:5]) or "No recent order records."
+    order_text += "\nI cannot submit, cancel, release or flatten orders through chat."
+    notes = "\n".join(f"• {n.get('timestamp', '?')} · {n.get('level', '?')}: {n.get('title', '')}" for n in d["notifications"][:5])
+    notes = notes or "No notifications recorded. This does not establish that the system is running."
+    risk = ("Moon's checklist: maximum $100 risk per entry including estimated fees; at most 2 concurrent positions; "
+            "$40 cumulative daily realized-loss breaker (wins do not offset losses).\n"
+            f"Recorded loss today: {loss}; breaker latched: {'yes' if d['latched'] else 'no' if d['ledger_known'] else 'unknown'}.\n"
+            "The $40 breaker blocks NEW entries after losses are booked. It does not cap losses on existing positions or guarantee stop fills. "
+            "No strategy or risk limit guarantees a profit. These are shared limits, not four separate budgets.")
+    research_lines, by_symbol = [], {}
+    caution = ("These are underlying-price R results, NOT option profits or a dollar forecast. The sample flag is only a count threshold, "
+               "not statistical proof. Premium, IV, theta, spreads and fees are not modeled. "
+               "Outcome labels may describe an exit trigger rather than positive P&L. Audit unusual fills and large R values; "
+               "test out-of-sample before considering paper validation. No report enables a playbook.")
+    for report in d["research"]:
+        symbol = str(report.get("symbol", "unknown"))
+        lines = []
+        for name, raw in _obj(report.get("summary")).items():
+            s = _obj(raw)
+            lines.append(f"• {symbol} / {name}: {s.get('resolved', '?')} resolved, mean {_decimal(s.get('expectancy_r'), 4)}R. "
+                         f"{'Count threshold met, not proof.' if s.get('sample_sufficient') is True else 'Small or unknown sample.'}")
+        research_lines.extend(lines)
+        by_symbol[symbol.upper()] = _reply("\n".join(lines) + "\n\n" + caution,
+            f"{report.get('file')} · {report.get('first_bar')} through {report.get('last_bar')} · saved {report.get('generated_at', 'unknown')}")
+    research_text = ("\n".join(research_lines) if research_lines else "No supported backtest reports saved as runtime/bt-*.json.") + "\n\n" + caution
+    scan = d["shadow"]
+    scan_text = "No shadow scan has been saved. Stocks Advanced can support stock research, but not realtime options selection."
+    if scan:
+        scan_text = f"Last saved shadow report: {scan.get('generated_at', 'unknown time')}. Ideas: {len(_rows(scan.get('shadow')))}. Snapshot errors: {len(errors)}.\n"
+        scan_text += "\n".join(f"• {r.get('symbol')}: {r.get('reason')}" for r in errors[:5])
+        if any("403" in str(r.get("reason")) for r in errors):
+            scan_text += "\n403 means access was denied. Check options-snapshot and realtime-quote entitlements. Stocks Advanced alone does not grant them."
+        scan_text += "\nZero ideas with data errors does not mean there were no market setups. I cannot fetch a fresh scan from chat."
+    next_steps = ("1. Check mode, positions, data-quality warnings and the age of your last cycle.\n"
+                  "2. Resolve unexplained broker/risk blockers; do not bypass them.\n"
+                  "3. Use Stocks Advanced for historical research while options access is pending. Keep unvalidated playbooks disabled.\n"
+                  "4. Review fills and exit reasons after each session. Rebuild this dashboard to update the snapshot.\n"
+                  "Safe diagnostic command: python -m alpaca_agents.executor reconcile\n"
+                  "Dashboard command: python -m alpaca_agents.dashboard\n"
+                  "These commands are displayed for you to review; I do not execute them.")
+    roles = "\n".join(f"{name} — {description}" for _, name, _, description in agents)
+    topics = {
+        "briefing": _reply(briefing, cycle_source + " · local fill/order journals"),
+        "blockers": _reply(blocked_text, cycle_source + " · trading-control · approval files · shadow-scan.json"),
+        "risk": _reply(risk, "System risk rules · fills.sqlite3 · " + str(d["today"]) + " ET"),
+        "positions": _reply(position_text, "fills.sqlite3 · local recorded inventory"),
+        "orders": _reply(order_text, "orders.sqlite3 · latest 5 of 25 displayed intents"),
+        "notifications": _reply(notes, "notifications.jsonl · latest 5 local notifications"),
+        "research": _reply(research_text, "Local bt-*.json reports · underlying-only replay"),
+        "scan": _reply(scan_text, "shadow-scan.json · saved report, not live quotes"),
+        "controls": _reply(controls, "trading-control · saved at dashboard render"),
+        "next": _reply(next_steps, "Operating guidance · no commands executed"),
+        "roles": _reply(roles, "Four architectural roles · chat is a Layer 4 guide only"),
+        "safety": _reply("I can't place, approve, cancel or change trades, controls, limits or keys. This chat is read-only and has no broker connection. "
+                         "I also can't promise returns or recommend a specific trade from a saved snapshot. Ask about recorded blockers, research or risk instead.", "Read-only chat boundary"),
+        "help": _reply("I'm a local, rule-based snapshot guide, not generative AI. I can explain your saved positions, orders, scans, research, risk limits, controls and notifications. "
+                       "Try the suggested questions. I don't have live prices, and chat is cleared on refresh. Never paste API keys here.", "Local guide capabilities"),
+    }
+    return {"rendered_at": d["now"].isoformat(), "topics": topics, "research": by_symbol,
+            "agents": [{"id": key, "name": name, "role": role, "avatar": avatar_uri(key),
+                        "intro": f"I'm {name}'s dashboard guide. My specialty: {role.lower()}. Ask me to explain the saved records; I cannot operate the trading system.",
+                        "prompts": PROMPTS[key]} for key, name, role, description in agents]}
+
+
+def safe_json(data):
+    # Prevent HTML-parser breakout from the non-executable JSON script block.
+    return json.dumps(data, ensure_ascii=True, allow_nan=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
+def render_chat(d, agents):
+    data = conversation_data(d, agents)
+    javascript = files("alpaca_agents").joinpath("assets", "dashboard.js").read_text(encoding="utf-8")
+    digest = base64.b64encode(hashlib.sha256(javascript.encode("utf-8")).digest()).decode("ascii")
+    csp = f"default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'sha256-{digest}'; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'"
+    options = "".join(f'<option value="{key}"{" selected" if key == "astra" else ""}>{name} · {html.escape(role)}</option>' for key, name, role, _ in agents)
+    markup = f'''<aside class="chat-dock" id="agent-chat" aria-labelledby="chat-title">
+<div class="chat-heading"><span class="eyebrow">Your crew, one conversation away</span><h2 id="chat-title">Talk to your agents</h2><p>Local snapshot guide · not generative AI</p></div>
+<label class="chat-label" for="chat-agent">Choose your agent</label><select id="chat-agent">{options}</select>
+<div class="chat-persona"><img id="chat-avatar" src="{avatar_uri('astra')}" alt="Astra avatar" width="58" height="64"><div><strong id="chat-name">Astra</strong><span id="chat-role">Dashboard &amp; Notifications</span></div><span class="local-badge">LOCAL</span></div>
+<p class="chat-snapshot" id="chat-snapshot">Saved snapshot · not live market data</p>
+<div id="chat-log" role="log" aria-live="polite" aria-relevant="additions" aria-label="Agent conversation" tabindex="0"><p class="chat-placeholder">Select a suggested question or type below. Enable JavaScript for local chat; the dashboard remains usable without it.</p></div>
+<div id="chat-prompts" aria-label="Suggested questions"></div>
+<form id="chat-form"><label class="chat-label" for="chat-input">Ask about your workspace</label><div class="composer"><textarea id="chat-input" rows="2" maxlength="800" placeholder="Why aren't we trading?" required disabled></textarea><button id="chat-send" type="submit" disabled aria-label="Send message">↗</button></div></form>
+<div class="chat-bottom"><span>Read-only · no network · no orders</span><button id="chat-clear" type="button" disabled>Clear chat</button></div>
+<p class="chat-privacy">Don’t paste keys. Messages stay in memory and clear on refresh. Replies use only the saved snapshot and supported topics.</p>
+<noscript><p class="notice">Local chat needs JavaScript. No remote service or API key is required.</p></noscript></aside>'''
+    scripts = f'<script id="agent-context" type="application/json">{safe_json(data)}</script><script>{javascript}</script>'
+    return markup, scripts, csp

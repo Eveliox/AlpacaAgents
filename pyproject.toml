@@ -11,3 +11,6 @@ dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+alpaca_agents = ["assets/*.png", "assets/*.js"]
