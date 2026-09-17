@@ -422,11 +422,16 @@ The four architectural roles have display names (not separate trading accounts o
 | Name | Role | Dashboard view |
 |---|---|---|
 | Houston | Executor | Positions, trades, intents, journal events, broker requests |
-| Star | Scanner | Playbook approvals and shadow idea counts |
+| Star | Scanner | Playbook approvals, scan errors, shadow ideas and historical research |
 | Moon | Rules Engine | System-wide risk limits and latest reconciliation blockers |
 | Astra | Dashboard / Notifications | Cycle reports and notifications |
 
-Generate and open the dashboard in PowerShell:
+**Easiest on Windows:** double-click `Open-Dashboard.cmd` in the project folder.
+It rebuilds the dashboard from local records and opens it. It does not need API
+keys, start a controller, fetch data or submit orders. Python and the installed
+package must already be available.
+
+Or generate and open the dashboard in PowerShell:
 
 ```powershell
 python -m alpaca_agents.dashboard
@@ -438,6 +443,34 @@ status stays visible in every view. The filters work offline without JavaScript;
 use Tab and arrow keys to navigate them with a keyboard. Filtering does not arm
 trading, approve playbooks, or allocate separate budgets. This remains a static
 snapshot: regenerate it for updated data, then refresh the browser.
+
+### Mission Control: recommended routine
+
+1. **Overview first.** Read “What to do next,” the control mode, snapshot age,
+   daily cumulative loss and outstanding intents. Missing/unreadable journals
+   show **Unknown**, not zero. A recent snapshot is not proof a controller is
+   running; age is computed at render time and does not tick in the browser.
+2. **Star for research.** Scan errors distinguish missing access (e.g. options
+   HTTP 403) from no setups. `runtime/bt-*.json` reports appear in Research lab
+   automatically. These are underlying-price R results, **not option P&L**.
+   A sample-count threshold is not statistical significance or proof of an edge.
+3. **Houston + Moon before trading.** Review positions, risk checks and any
+   reconciliation blockers. A `DISABLED` system does not manage exits either.
+   The dashboard never modifies controls or approves playbooks.
+4. **Astra after a session.** Review notifications and cycle history. Expand
+   technical order/journal/request details only when investigating a problem.
+
+Standalone `executor reconcile` output does not populate the dashboard's cycle
+history. With the necessary credentials loaded, one controller cycle **without
+`--submit`** records a dry-cycle snapshot:
+
+```powershell
+python -m alpaca_agents.controller --runtime runtime --dashboard
+```
+
+A disabled control mode skips scanning and exits. A shadow scan is a separate
+command and requires options-data access. Refreshing the browser alone never
+fetches broker data. No web server or additional UI dependencies are required.
 
 ## Alpaca paper environment: what is and is not simulated
 
