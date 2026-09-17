@@ -188,7 +188,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual((rec["open_positions"], rec["pending"]), (1, 0))
         self.assertEqual(self.ledger.inventory()[0]["contract"], CONTRACT)
         self.assertEqual(self.journal.live_intents(), [])
-        self.assertIn("no same-day round trips", report["stages"]["exits"][0]["note"])
+        self.assertIn("opened this session; holding", report["stages"]["exits"][0]["note"])
         self.backdate_entries()
         self.assertTrue(self.cycle()["stages"]["exits"][0]["note"].startswith("hold"))
         self.assertEqual(len(self.posts()), 1)
@@ -393,6 +393,27 @@ class ManualCommandTests(ControllerTests):
         self.assertEqual(self.cli("intents")[1].count("manual_flatten"), 0)        # live_intents has no idea text
         self.assertEqual(self.journal.live_intents()[0]["kind"], "exit")
         self.assertTrue(self.cycle()["stages"]["reconcile"]["ok"])                 # matched open sell
+
+    def test_same_session_premium_stop_exits_within_pdt_budget(self):
+        """Bought this morning, mark collapses this afternoon: the -50% stop protects (day trade 1 of 3)."""
+        self.cycle()
+        self.t = datetime.now(timezone.utc) - timedelta(seconds=1)
+        self.broker.fill(self.journal.live_intents()[0]["client_order_id"], "0.90")
+        self.broker.marks[CONTRACT] = "0.40"
+        report = self.cycle()
+        exit_ = report["stages"]["exits"][0]
+        self.assertEqual(exit_["note"], "premium_stop")
+        self.assertTrue(exit_["prepared"], exit_["reason"])
+        self.assertEqual(exit_["submission"]["outcome"], "submitted")
+        self.assertEqual(self.broker.orders["bo-2"]["side"], "sell")
+        self.assertIn("same-session protective exit, day trade 1 of 3", json.dumps(self.journal.events(), default=str))
+        # Book the sell: the ledger now shows one day trade in the window; a target is still never same-session.
+        self.t = datetime.now(timezone.utc) - timedelta(seconds=1)
+        self.broker.fill(self.journal.live_intents()[0]["client_order_id"], "0.38")
+        self.cycle()
+        from alpaca_agents.executor.eastern import eastern_date
+        self.assertEqual(self.ledger.day_trades_since(eastern_date(datetime.now(timezone.utc))), 1)
+        self.assertEqual(self.ledger.inventory(), [])
 
     def test_ema20_rule_fires_in_cycle_with_bars_provider(self):
         from alpaca_agents.scanner.indicators import Bar

@@ -60,12 +60,14 @@ class ChatTests(unittest.TestCase):
     def test_research_does_not_turn_r_into_dollars_or_statistical_proof(self):
         d = self.data()
         d["research"] = [{"symbol": "QQQ", "file": "bt-QQQ.json", "generated_at": NOW.isoformat(),
-                          "summary": {"trend": {"resolved": 61, "expectancy_r": 0.6254, "sample_sufficient": True}}}]
+                          "summary": {"trend": {"resolved": 37, "expectancy_r": 0.2527, "median_r": 0.191, "profit_factor": 1.5308,
+                                                "max_loss_r": -1.839, "no_trade": 1, "sample_sufficient": True}}}]
         context = conversation_data(d, AGENTS)
         reply = context["research"]["QQQ"]
-        for text in ("0.6254R", "NOT option profits", "not proof", "Outcome labels"):
+        for text in ("mean 0.25R", "median 0.19R", "profit factor 1.53", "worst -1.8R", "no-trade fills 1",
+                     "NOT option profits", "not proof", "outlier trades carry", "Outcome labels"):
             self.assertIn(text, reply["text"])
-        self.assertNotIn("$62.54", reply["text"])
+        self.assertNotIn("$25", reply["text"])
         self.assertIn("bt-QQQ.json", reply["source"])
 
     def test_context_does_not_embed_private_account_or_order_fields(self):

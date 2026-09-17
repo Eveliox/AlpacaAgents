@@ -24,6 +24,30 @@ def bars_from_closes(closes, volumes=None, last=AS_OF, spread=0.005):
     return tuple(out)
 
 
+def bounce_bars(spread=0.002):
+    """Uptrend, then a 4-session slide with a real swing low (a wick) to lean a stop on.
+
+    Without the wick the 10-session low is today's low, a few cents under the
+    close: a stop inside noise, which the signal now refuses.
+    """
+    closes = uptrend(rate=0.002)
+    for i in range(1, 5):
+        closes[-i] = closes[-5] * (0.99 ** (5 - i))
+    bars = list(bars_from_closes(closes, spread=spread))
+    b = bars[-3]
+    bars[-3] = Bar(b.day, b.open, b.high, b.close * 0.97, b.close, b.volume)
+    return tuple(bars)
+
+
+def breakout_bars(last_close=101.1, last_volume=2_000_000.0, spread=0.002):
+    """Gentle 8-session oscillation (daily ranges well inside the 10-session range), then a close above it."""
+    import math
+    closes = [100 + 0.5 * math.sin(2 * math.pi * i / 8) for i in range(220)]
+    volumes = [1_000_000.0] * 220
+    closes[-1], volumes[-1] = last_close, last_volume
+    return bars_from_closes(closes, volumes, spread=spread)
+
+
 def uptrend(n=220, start=40.0, rate=0.003):
     return [start * (1 + rate) ** i for i in range(n)]
 
@@ -89,8 +113,10 @@ class SignalTests(unittest.TestCase):
         closes = uptrend(rate=0.002)
         for i in range(1, 5):
             closes[-i] = closes[-5] * (0.99 ** (5 - i))
-        sig = oversold_bounce_signal(bars_from_closes(closes))
-        self.assertIsInstance(sig, Signal)
+        # On a straight slide the "swing low" is today's low, cents under the close: inside noise, refused.
+        self.assertIn("inside noise", oversold_bounce_signal(bars_from_closes(closes)).reason)
+        sig = oversold_bounce_signal(bounce_bars())
+        self.assertIsInstance(sig, Signal, getattr(sig, "reason", None))
         self.assertEqual(sig.direction, "long")
         self.assertLess(sig.stop, sig.entry)
         self.assertGreater(sig.target, sig.entry)
@@ -98,16 +124,16 @@ class SignalTests(unittest.TestCase):
         self.assertIn("SMA200", oversold_bounce_signal(bars_from_closes(dn)).reason)
 
     def test_breakout_requires_tight_range_volume_and_no_chase(self):
-        closes = [100 + (0.5 if i % 2 else -0.5) for i in range(220)]
-        volumes = [1_000_000.0] * 220
-        closes[-1], volumes[-1] = 101.3, 2_000_000.0     # range top ~101.0 (100.5 * 1.005)
-        sig = breakout_signal(bars_from_closes(closes, volumes))
+        # A whipsaw where every day spans the whole range has ATR ~ range width: no stop can clear noise.
+        whip = [100 + (0.5 if i % 2 else -0.5) for i in range(220)]
+        vol = [1_000_000.0] * 219 + [2_000_000.0]
+        whip[-1] = 101.3
+        self.assertIn("inside noise", breakout_signal(bars_from_closes(whip, vol)).reason)
+        sig = breakout_signal(breakout_bars())                    # range top 100.5 * 1.002; risk 0.40 > 0.5 ATR
         self.assertIsInstance(sig, Signal, getattr(sig, "reason", None))
-        self.assertAlmostEqual(sig.stop, 100.5 * 1.005)
-        volumes[-1] = 1_100_000.0
-        self.assertIn("volume", breakout_signal(bars_from_closes(closes, volumes)).reason)
-        volumes[-1], closes[-1] = 2_000_000.0, 104.0
-        self.assertIn("chase", breakout_signal(bars_from_closes(closes, volumes)).reason)
+        self.assertAlmostEqual(sig.stop, 100.5 * 1.002)
+        self.assertIn("volume", breakout_signal(breakout_bars(last_volume=1_100_000.0)).reason)
+        self.assertIn("chase", breakout_signal(breakout_bars(last_close=104.0)).reason)
 
 
 class ContractTests(unittest.TestCase):
@@ -149,14 +175,9 @@ class ScanTests(unittest.TestCase):
 
     def test_every_playbook_idea_passes_rules_engine(self):
         snaps = [snapshot("IWM", bars_from_closes(uptrend()), chain(uptrend()[-1]) + chain(uptrend()[-1], "put"))]
-        bounce = uptrend(rate=0.002)
-        for i in range(1, 5):
-            bounce[-i] = bounce[-5] * (0.99 ** (5 - i))
-        snaps.append(snapshot("XLF", bars_from_closes(bounce), chain(bounce[-1])))
-        brk = [100 + (0.5 if i % 2 else -0.5) for i in range(220)]
-        vol = [1_000_000.0] * 220
-        brk[-1], vol[-1] = 101.3, 2_000_000.0
-        snaps.append(snapshot("XLE", bars_from_closes(brk, vol), chain(101.3)))
+        bounce = bounce_bars()
+        snaps.append(snapshot("XLF", bounce, chain(bounce[-1].close)))
+        snaps.append(snapshot("XLE", breakout_bars(), chain(101.1)))
         cfg = ScanConfig(universe=frozenset({"IWM", "XLF", "XLE"}), enabled_playbooks=ALL_ON, max_open_positions=5)
         result = scan(snaps, cfg, as_of=AS_OF)
         seen = {i["playbook"] for i in result.shadow}

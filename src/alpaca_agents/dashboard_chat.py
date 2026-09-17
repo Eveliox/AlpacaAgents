@@ -113,7 +113,8 @@ def conversation_data(d, agents):
             "The $40 breaker blocks NEW entries after losses are booked. It does not cap losses on existing positions or guarantee stop fills. "
             "No strategy or risk limit guarantees a profit. These are shared limits, not four separate budgets.")
     research_lines, by_symbol = [], {}
-    caution = ("These are underlying-price R results, NOT option profits or a dollar forecast. The sample flag is only a count threshold, "
+    caution = ("These are underlying-price R results, NOT option profits or a dollar forecast. A positive mean with a negative median means a few "
+               "outlier trades carry the result. The sample flag is only a count threshold, "
                "not statistical proof. Premium, IV, theta, spreads and fees are not modeled. "
                "Outcome labels may describe an exit trigger rather than positive P&L. Audit unusual fills and large R values; "
                "test out-of-sample before considering paper validation. No report enables a playbook.")
@@ -122,7 +123,9 @@ def conversation_data(d, agents):
         lines = []
         for name, raw in _obj(report.get("summary")).items():
             s = _obj(raw)
-            lines.append(f"• {symbol} / {name}: {s.get('resolved', '?')} resolved, mean {_decimal(s.get('expectancy_r'), 4)}R. "
+            lines.append(f"• {symbol} / {name}: {s.get('resolved', '?')} resolved, mean {_decimal(s.get('expectancy_r'), 2)}R, "
+                         f"median {_decimal(s.get('median_r'), 2)}R, profit factor {_decimal(s.get('profit_factor'), 2)}, "
+                         f"worst {_decimal(s.get('max_loss_r'), 1)}R, no-trade fills {s.get('no_trade', '?')}. "
                          f"{'Count threshold met, not proof.' if s.get('sample_sufficient') is True else 'Small or unknown sample.'}")
         research_lines.extend(lines)
         by_symbol[symbol.upper()] = _reply("\n".join(lines) + "\n\n" + caution,

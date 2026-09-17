@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from .calendar import previous_session
 from .executor.client import ExecutorError
-from .executor.exits import HeldOption, evaluate_exit
+from .executor.exits import HeldOption, PDT_WINDOW_SESSIONS, evaluate_exit
 from .executor.reconcile import ReconcileConfig, build_risk_state, config_from_runtime
 from .executor.submit import submit_claimed
 from .gateway import control_mode
@@ -132,6 +132,10 @@ def run_cycle(*, client, ledger, store, journal, notifier, ideas_provider, close
         except Exception as exc:  # provider failure must not crash the cycle
             marks, closes, bars, bids = {}, {}, {}, {}
             notifier.send("warning", "Exit inputs unavailable", {"cycle_id": cycle_id, "error": type(exc).__name__}, now=now)
+        window_start = trading_day
+        for _ in range(PDT_WINDOW_SESSIONS - 1):
+            window_start = previous_session(window_start)
+        day_trades_used = ledger.day_trades_since(window_start)
         for row in inventory:
             contract = row["contract"]
             entry = journal.entry_for(contract)
@@ -141,7 +145,7 @@ def run_cycle(*, client, ledger, store, journal, notifier, ideas_provider, close
             held = HeldOption(contract, row["quantity"], row["remaining_basis"], marks.get(contract),
                               closes.get(contract[:-15]), date.fromisoformat(entry["trading_day"]),
                               tuple(bars.get(contract[:-15], ())), bids.get(contract))
-            decision, note = evaluate_exit(held, entry["idea"], trading_day=trading_day)
+            decision, note = evaluate_exit(held, entry["idea"], trading_day=trading_day, day_trades_used=day_trades_used)
             record = {"contract": contract, "note": note}
             if decision is not None and config.submit is not True:
                 record["decision"] = decision

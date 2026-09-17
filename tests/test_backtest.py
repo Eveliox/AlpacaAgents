@@ -90,22 +90,30 @@ class ReplayTests(unittest.TestCase):
         self.assertIsNone(summarize(outcomes)["trend"]["expectancy_r"])
 
     def test_summary_math_and_sample_gate(self):
-        def o(playbook, outcome, r, held):
+        def o(playbook, outcome, r, held, why):
             return TradeOutcome(playbook, "X", START, "long", 1, .9, 1.2, START, 1, START, 1 + r * .1,
-                                outcome, r, held)
-        outcomes = [o("breakout", "win", 2.0, 5), o("breakout", "loss", -1.0, 2),
-                    o("breakout", "loss", -1.0, 6), o("breakout", "timeout", 0.5, 15),
-                    TradeOutcome("breakout", "X", START, "long", 1, .9, 1.2, None, None, None, None, "no_fill", None, None)]
+                                outcome, r, held, why)
+        outcomes = [o("breakout", "win", 2.0, 5, "target"), o("breakout", "loss", -1.0, 2, "stop"),
+                    o("breakout", "loss", -1.0, 6, "stop"), o("breakout", "win", 0.5, 15, "timeout"),
+                    TradeOutcome("breakout", "X", START, "long", 1, .9, 1.2, None, None, None, None, "no_fill", None, None),
+                    TradeOutcome("breakout", "X", START, "long", 1, .9, 1.2, START, 1.3, START, None, "no_trade", None, 0, "fill_beyond_target")]
         s = summarize(outcomes)["breakout"]
-        self.assertEqual((s["signals"], s["resolved"], s["no_fill"]), (5, 4, 1))
-        self.assertEqual(s["win_rate"], 0.25)
+        self.assertEqual((s["signals"], s["resolved"], s["no_fill"], s["no_trade"]), (6, 4, 1, 1))
+        self.assertEqual(s["no_trade_reasons"], {"fill_beyond_stop": 0, "fill_beyond_target": 1})
+        self.assertEqual(s["win_rate"], 0.5)                # by sign of R: the profitable timeout is a win
+        self.assertEqual(s["target_hit_rate"], 0.25)        # only one exited at the target
+        self.assertEqual(s["exits"], {"stop": 2, "target": 1, "timeout": 1})
         self.assertEqual(s["expectancy_r"], 0.125)
-        self.assertEqual(s["failed_breakout_rate"], 0.25)   # one loss within 3 sessions of 4 resolved
+        self.assertEqual(s["median_r"], -0.25)
+        self.assertEqual(s["profit_factor"], 1.25)          # 2.5 gross win / 2.0 gross loss
+        self.assertEqual((s["max_win_r"], s["max_loss_r"]), (2.0, -1.0))
+        self.assertEqual(s["failed_breakout_rate"], 0.25)   # one stop-loss within 3 sessions of 4 resolved
         self.assertFalse(s["sample_sufficient"])
         self.assertFalse(s["negative_expectancy"])
         rows = outcome_dicts(outcomes)
         json.dumps(rows)
-        self.assertIsNone(rows[-1]["fill_day"])
+        self.assertIsNone(rows[-2]["fill_day"])
+        self.assertEqual((rows[-1]["outcome"], rows[-1]["exit_reason"]), ("no_trade", "fill_beyond_target"))
 
     def test_rejects_unknown_playbook_and_short_history(self):
         with self.assertRaises(ValueError):

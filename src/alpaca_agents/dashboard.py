@@ -267,16 +267,18 @@ def _research(reports):
             s = _dict(summary)
             rows.append((report.get("symbol"), playbook,
                          f"{report.get('first_bar', '?')} → {report.get('last_bar', '?')}",
-                         s.get("resolved"), _number(s.get("expectancy_r"), 4),
+                         s.get("resolved"), s.get("no_trade", "—"), _number(s.get("expectancy_r"), 2), _number(s.get("median_r"), 2),
+                         _number(s.get("profit_factor"), 2), _number(s.get("max_loss_r"), 1),
                          "Count threshold met; not statistical proof" if s.get("sample_sufficient") is True else "Small / unknown sample",
                          report.get("file")))
     return _panel("star", "Research lab", '<p class="research-warning">Underlying-price research only · options P&amp;L is NOT modeled.</p>' +
-                  _table(["Symbol", "Playbook", "Bar coverage", "Resolved", "Mean R", "Sample note", "Source"], rows, numeric={3, 4},
+                  _table(["Symbol", "Playbook", "Bar coverage", "Resolved", "No trade", "Mean R", "Median R", "Profit factor", "Worst R", "Sample note", "Source"],
+                         rows, numeric={3, 4, 5, 6, 7, 8},
                          empty="No backtest reports yet. Save reports as runtime/bt-SYMBOL.json to compare them here.") +
-                  '<p class="dim small">R measures the underlying move relative to modeled stop distance, not dollars earned on an option. '
-                  'Fees, spreads, IV and time decay are absent. Outcome labels may describe an exit trigger rather than a profitable trade. '
-                  'Audit unusual fills and large R values, test out-of-sample, then validate option-level execution. '
-                  'No result here approves a playbook or proves an edge.</p>', wide=True)
+                  '<p class="dim small">R measures the underlying move relative to the modeled stop distance, not dollars earned on an option. '
+                  'Fees, spreads, IV and time decay are absent. Mean R is dominated by gap outliers: when the median is negative while the mean is positive, '
+                  'a few trades carry the result. Win/loss is the sign of R; "no trade" counts fills already past the stop or target that a rational '
+                  'executor would skip. Test out-of-sample, then validate option-level execution. No result here approves a playbook or proves an edge.</p>', wide=True)
 
 
 def render(d: dict) -> str:

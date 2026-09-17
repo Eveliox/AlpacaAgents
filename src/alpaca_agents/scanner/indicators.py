@@ -101,3 +101,13 @@ def pivot_lows(bars, lookback: int, wing: int = 2) -> list:
         if all(low < bars[j].low for j in range(i - wing, i + wing + 1) if j != i):
             result.append(low)
     return result
+
+
+def atr(bars, period: int = 14) -> float:
+    """Average true range over the last `period` bars (simple mean of true ranges)."""
+    if period < 1 or len(bars) < period + 1:
+        raise ValueError("not enough bars for ATR")
+    ranges = []
+    for prev, cur in zip(bars[-period - 1:-1], bars[-period:]):
+        ranges.append(max(cur.high - cur.low, abs(cur.high - prev.close), abs(cur.low - prev.close)))
+    return sum(ranges) / period

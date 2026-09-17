@@ -5,7 +5,7 @@ tune before enabling any playbook in ScanConfig.enabled_playbooks.
 """
 from dataclasses import dataclass
 
-from .indicators import ema, ema_series, momentum, pivot_highs, pivot_lows, rsi, sma, validate_bars
+from .indicators import atr, ema, ema_series, momentum, pivot_highs, pivot_lows, rsi, sma, validate_bars
 
 CHASE_LIMIT = 0.015        # skip if price already ran >1.5% past the trigger
 PULLBACK_BAND = 0.01       # "pullback toward EMA20": close within 1% above/below EMA20
@@ -17,6 +17,10 @@ BREAKOUT_RANGE_SESSIONS = 10
 BREAKOUT_RANGE_WIDTH = 0.05
 BREAKOUT_VOLUME_MULTIPLE = 1.5
 BREAKOUT_NEAR_HIGHS = 0.97      # range top within 3% of the 60-session high
+# A stop inside normal daily noise is not a swing-trade stop: it exits on noise
+# live and produces absurd R-multiples in replay (an 8-cent stop turns a 1%
+# gap into -38R). Risk must be at least this many ATR14.
+MIN_RISK_ATR = 0.5
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,15 @@ def _reward_risk(direction, entry, stop, target):
     if risk <= 0 or reward <= 0:
         return 0.0
     return reward / risk
+
+
+def _stop_too_tight(bars, entry, stop):
+    """Reason string when |entry - stop| is inside noise, else None."""
+    floor = MIN_RISK_ATR * atr(bars, 14)
+    risk = abs(entry - stop)
+    if risk < floor:
+        return f"stop {risk:.2f} from entry is inside noise (min {floor:.2f} = {MIN_RISK_ATR} x ATR14)"
+    return None
 
 
 def _nearest_level(levels, entry, direction):
@@ -83,6 +96,9 @@ def trend_signal(bars):
     risk = abs(entry - stop)
     if risk <= 0:
         return Skip(name, "entry not beyond EMA20 stop")
+    tight = _stop_too_tight(bars, entry, stop)
+    if tight:
+        return Skip(name, tight)
     if level is None:
         target = entry + FALLBACK_REWARD_MULTIPLE * risk if direction == "long" else entry - FALLBACK_REWARD_MULTIPLE * risk
         target_note = "no swing level in path; projected 1.5R"
@@ -118,6 +134,9 @@ def oversold_bounce_signal(bars):
     stop = min(b.low for b in bars[-BOUNCE_SWING_LOW_LOOKBACK:])
     if stop >= entry:
         return Skip(name, "swing-low stop not below entry")
+    tight = _stop_too_tight(bars, entry, stop)
+    if tight:
+        return Skip(name, tight)
     e20 = ema(closes, 20)
     candidates = [lvl for lvl in (e20,) if lvl > entry]
     swing = _nearest_level(pivot_highs(bars, RESISTANCE_LOOKBACK), entry, "long")
@@ -157,6 +176,9 @@ def breakout_signal(bars):
     if today.close > range_high * (1 + CHASE_LIMIT):
         return Skip(name, "already extended past breakout level; do not chase")
     entry, stop = today.close, range_high
+    tight = _stop_too_tight(bars, entry, stop)
+    if tight:
+        return Skip(name, tight)
     target = range_high + (range_high - range_low)
     rr = _reward_risk("long", entry, stop, target)
     if rr < 1:

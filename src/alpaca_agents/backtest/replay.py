@@ -5,9 +5,17 @@ Honesty rules baked in:
 - Fills happen no earlier than the next session's open.
 - Stop checks are close-based (matching the playbook's "closes back through"
   wording), so a gap through the stop exits at the worse close, not the stop.
-- Same-session stop and target => counted as a loss.
+- Same-session stop and target => the stop is assumed to have hit first.
+- A fill already through the stop or at/beyond the target is NO TRADE: a
+  rational executor would not enter, so it is counted separately and excluded
+  from the statistics rather than booked as a synthetic -1R or a "win".
+- `exit_reason` (stop / target / timeout) is independent of `outcome`, which is
+  the SIGN of the R-multiple. A trend position closed by its rising EMA20 in
+  profit is a win that exited on the stop rule; the old code called it a loss.
 - Results are R-multiples on the UNDERLYING. A 1R underlying win does not mean
   the option made 1R; option outcomes need point-in-time option quotes.
+- Beware the mean: gaps through stops are open-ended in R. Read median_r and
+  profit_factor next to expectancy_r, and max_loss_r for what one gap costs.
 """
 from dataclasses import dataclass, asdict
 from datetime import date
@@ -39,9 +47,14 @@ class TradeOutcome:
     fill_price: float | None
     exit_day: date | None
     exit_price: float | None
-    outcome: str            # win | loss | timeout | no_fill | unresolved
+    outcome: str            # win | loss | flat (sign of R) | no_trade | no_fill | unresolved
     r_multiple: float | None
     sessions_held: int | None
+    exit_reason: str | None = None   # stop | target | timeout | fill_beyond_stop | fill_beyond_target
+
+
+def _outcome(r: float) -> str:
+    return "win" if r > 0 else "loss" if r < 0 else "flat"
 
 
 def _simulate(bars, start, signal: Signal, playbook: str, symbol: str) -> TradeOutcome:
@@ -70,10 +83,14 @@ def _simulate(bars, start, signal: Signal, playbook: str, symbol: str) -> TradeO
                             outcome="no_fill", r_multiple=None, sessions_held=None)
 
     risk = (fill - stop) if long else (stop - fill)
-    if risk <= 0:  # gapped through the stop before we were even in
+    if risk <= 0:  # gapped through the stop before we were in: not a trade
         return TradeOutcome(**base, fill_day=bars[fill_idx].day, fill_price=fill, exit_day=bars[fill_idx].day,
-                            exit_price=bars[fill_idx].close, outcome="loss",
-                            r_multiple=-1.0, sessions_held=0)
+                            exit_price=None, outcome="no_trade", r_multiple=None, sessions_held=0,
+                            exit_reason="fill_beyond_stop")
+    if (fill >= target) if long else (fill <= target):  # nothing left to capture
+        return TradeOutcome(**base, fill_day=bars[fill_idx].day, fill_price=fill, exit_day=bars[fill_idx].day,
+                            exit_price=None, outcome="no_trade", r_multiple=None, sessions_held=0,
+                            exit_reason="fill_beyond_target")
 
     last = min(fill_idx + HOLD_LIMIT[playbook], len(bars))
     for j in range(fill_idx, last):
@@ -86,14 +103,15 @@ def _simulate(bars, start, signal: Signal, playbook: str, symbol: str) -> TradeO
         stopped = b.close <= stop_level if long else b.close >= stop_level
         targeted = b.high >= target if long else b.low <= target
         if stopped:
-            exit_price, outcome = b.close, "loss"
+            exit_price, why = b.close, "stop"
         elif targeted:
-            exit_price, outcome = target, "win"
+            exit_price, why = target, "target"
         else:
             continue
         r = ((exit_price - fill) if long else (fill - exit_price)) / risk
         return TradeOutcome(**base, fill_day=bars[fill_idx].day, fill_price=fill, exit_day=b.day,
-                            exit_price=exit_price, outcome=outcome, r_multiple=r, sessions_held=j - fill_idx)
+                            exit_price=exit_price, outcome=_outcome(r), r_multiple=r, sessions_held=j - fill_idx,
+                            exit_reason=why)
 
     if fill_idx + HOLD_LIMIT[playbook] > len(bars):
         return TradeOutcome(**base, fill_day=bars[fill_idx].day, fill_price=fill, exit_day=None, exit_price=None,
@@ -101,7 +119,8 @@ def _simulate(bars, start, signal: Signal, playbook: str, symbol: str) -> TradeO
     b = bars[last - 1]
     r = ((b.close - fill) if long else (fill - b.close)) / risk
     return TradeOutcome(**base, fill_day=bars[fill_idx].day, fill_price=fill, exit_day=b.day,
-                        exit_price=b.close, outcome="timeout", r_multiple=r, sessions_held=last - 1 - fill_idx)
+                        exit_price=b.close, outcome=_outcome(r), r_multiple=r, sessions_held=last - 1 - fill_idx,
+                        exit_reason="timeout")
 
 
 def replay(bars, symbol: str, *, playbooks=tuple(SIGNALS)) -> list:
@@ -123,7 +142,7 @@ def replay(bars, symbol: str, *, playbooks=tuple(SIGNALS)) -> list:
                 continue
             result = _simulate(bars, i + 1, signal, playbook, symbol)
             outcomes.append(result)
-            if result.exit_day is not None:
+            if result.exit_day is not None:   # includes no_trade fills: the session was consumed
                 busy_until[playbook] = next(k for k in range(i + 1, len(bars)) if bars[k].day == result.exit_day)
             elif result.outcome == "unresolved":
                 busy_until[playbook] = len(bars)
@@ -133,31 +152,46 @@ def replay(bars, symbol: str, *, playbooks=tuple(SIGNALS)) -> list:
 
 
 def summarize(outcomes) -> dict:
-    """Per-playbook underlying-level statistics. Expectancy is in R, not dollars."""
+    """Per-playbook underlying-level statistics. Expectancy is in R, not dollars.
+
+    win/loss are by SIGN of R. exits (stop/target/timeout) say why a trade
+    ended. no_trade fills are excluded from every statistic and counted.
+    """
     report = {}
     for playbook in sorted({o.playbook for o in outcomes}):
         mine = [o for o in outcomes if o.playbook == playbook]
-        resolved = [o for o in mine if o.outcome in ("win", "loss", "timeout")]
+        resolved = [o for o in mine if o.outcome in ("win", "loss", "flat")]
         wins = [o for o in resolved if o.outcome == "win"]
         losses = [o for o in resolved if o.outcome == "loss"]
-        timeouts = [o for o in resolved if o.outcome == "timeout"]
         rs = [o.r_multiple for o in resolved]
+        gross_win = sum(r for r in rs if r > 0)
+        gross_loss = -sum(r for r in rs if r < 0)
         entry = {
             "signals": len(mine),
             "no_fill": sum(o.outcome == "no_fill" for o in mine),
+            "no_trade": sum(o.outcome == "no_trade" for o in mine),
+            "no_trade_reasons": {why: sum(o.exit_reason == why for o in mine if o.outcome == "no_trade")
+                                 for why in ("fill_beyond_stop", "fill_beyond_target")},
             "unresolved": sum(o.outcome == "unresolved" for o in mine),
             "resolved": len(resolved),
-            "wins": len(wins), "losses": len(losses), "timeouts": len(timeouts),
+            "wins": len(wins), "losses": len(losses), "flat": len(resolved) - len(wins) - len(losses),
+            "exits": {why: sum(o.exit_reason == why for o in resolved) for why in ("stop", "target", "timeout")},
             "win_rate": round(len(wins) / len(resolved), 4) if resolved else None,
+            "target_hit_rate": round(sum(o.exit_reason == "target" for o in resolved) / len(resolved), 4) if resolved else None,
             "expectancy_r": round(mean(rs), 4) if rs else None,
+            "median_r": round(median(rs), 4) if rs else None,
+            "profit_factor": (round(gross_win / gross_loss, 4) if gross_loss > 0 else None) if rs else None,
             "avg_win_r": round(mean(o.r_multiple for o in wins), 4) if wins else None,
             "avg_loss_r": round(mean(o.r_multiple for o in losses), 4) if losses else None,
+            "max_win_r": round(max(rs), 4) if rs else None,
+            "max_loss_r": round(min(rs), 4) if rs else None,
             "median_sessions_held": median(o.sessions_held for o in resolved) if resolved else None,
             "sample_sufficient": len(resolved) >= MIN_SAMPLE,
             "negative_expectancy": (mean(rs) < 0) if rs else None,
         }
         if playbook == "breakout":
-            fast_fail = [o for o in losses if o.sessions_held is not None and o.sessions_held <= FAILED_BREAKOUT_SESSIONS]
+            fast_fail = [o for o in losses if o.exit_reason == "stop" and o.sessions_held is not None
+                         and o.sessions_held <= FAILED_BREAKOUT_SESSIONS]
             entry["failed_breakout_rate"] = round(len(fast_fail) / len(resolved), 4) if resolved else None
         report[playbook] = entry
     return report

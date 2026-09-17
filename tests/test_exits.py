@@ -104,10 +104,33 @@ class ExitRuleTests(unittest.TestCase):
         decision, note = evaluate_exit(held(underlying_close=Decimal("100"), bars=rising), idea(exit_plan=plan), trading_day=DAY)
         self.assertEqual(note, "underlying_stop")
 
-    def test_same_day_round_trip_refused_and_bid_pricing(self):
+    def test_same_session_exit_is_protective_only_and_pdt_budgeted(self):
+        # Premium stop fired on entry day: allowed as protection while the PDT budget has room.
         decision, note = evaluate_exit(held(entry_day=DAY, mark=Decimal("0.10")), idea(), trading_day=DAY)
+        self.assertEqual(note, "premium_stop")
+        self.assertIn("day trade 1 of 3", decision["detail"])
+        decision, note = evaluate_exit(held(entry_day=DAY, mark=Decimal("0.10")), idea(), trading_day=DAY, day_trades_used=2)
+        self.assertIn("day trade 3 of 3", decision["detail"])
+        # Budget spent: hold to the next session, and say why.
+        decision, note = evaluate_exit(held(entry_day=DAY, mark=Decimal("0.10")), idea(), trading_day=DAY, day_trades_used=3)
         self.assertIsNone(decision)
-        self.assertIn("same-day", note)
+        self.assertIn("3 day trades already used", note)
+        # Never same-session profit-taking or time exits, even with the underlying through target / DTE low.
+        for kw in (dict(underlying_close=Decimal("250")), dict(underlying_close=Decimal("100")), dict(mark=Decimal("2.00"))):
+            decision, note = evaluate_exit(held(entry_day=DAY, **kw), idea(), trading_day=DAY)
+            self.assertIsNone(decision, kw)
+            self.assertIn("opened this session", note)
+        decision, note = evaluate_exit(held(entry_day=date(2026, 9, 25), mark=Decimal("1.00")), idea(), trading_day=date(2026, 9, 25))
+        self.assertIsNone(decision)   # time_stop would fire (21 DTE) but not on entry day
+        # Missing mark on entry day: nothing to evaluate, hold.
+        self.assertIsNone(evaluate_exit(held(entry_day=DAY, mark=None), idea(), trading_day=DAY)[0])
+        self.assertIsNone(evaluate_exit(held(mark=Decimal("0.10")), idea(), trading_day=DAY, day_trades_used=-1)[0])
+        self.assertIsNone(evaluate_exit(held(mark=Decimal("0.10")), idea(), trading_day=DAY, day_trades_used=True)[0])
+        # Next session, the budget is irrelevant: a normal exit is not a day trade.
+        decision, note = evaluate_exit(held(mark=Decimal("0.10")), idea(), trading_day=DAY, day_trades_used=3)
+        self.assertEqual(note, "premium_stop")
+
+    def test_bid_pricing(self):
         decision, _ = evaluate_exit(held(mark=Decimal("0.40"), bid=Decimal("0.37")), idea(), trading_day=DAY)
         self.assertEqual(decision["limit_price"], "0.37")
         self.assertIn("priced at bid", decision["detail"])

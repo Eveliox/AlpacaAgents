@@ -409,8 +409,16 @@ a broker-observed terminal status.
 
 The exit is a **day limit sell at the fresh NBBO bid** (marketable by
 definition in Alpaca paper), or at 95% of the broker mark when no fresh
-two-sided bid is available (floored at $0.01). A position is never exited on
-the session it was opened. Basis includes entry fees, so the
+two-sided bid is available (floored at $0.01).
+
+**Same-session exits are protective only.** On the session a position was
+opened, the underlying rules have no new information (their close is the
+signal session's), so only the premium stop is evaluated that day: a -50%
+collapse on day one is sold, never a target or time exit. Each same-session
+exit is a day trade; a margin account under $25k gets 3 per rolling 5
+sessions before PDT restrictions, so the controller counts them from the fill
+ledger (`day_trades_since`) and the rule refuses the 4th, holding to the next
+session with the loss bounded by the premium. Basis includes entry fees, so the
 premium stop is slightly conservative. Session counting uses the NYSE calendar. Missing close => underlying rules are
 skipped; missing mark => a fired rule is reported for manual attention but no
 order is priced.
@@ -532,7 +540,7 @@ From Alpaca's paper-trading documentation, and how each fact is handled:
 
 | Paper behaviour | Consequence here |
 |---|---|
-| Paper accounts are **margin** accounts (`multiplier` 2 or 4); a cash multiplier is not offered | Reconciliation blocks `NOT_CASH_ACCOUNT` until the owner creates `runtime/paper-margin-acknowledged` containing exactly `ACKNOWLEDGED`. With it, cash semantics are enforced **locally**: spendable cash = broker `cash` (never buying power) minus unsettled sale proceeds minus reservations; long-only; no same-day round trips. Unknown multipliers still block. |
+| Paper accounts are **margin** accounts (`multiplier` 2 or 4); a cash multiplier is not offered | Reconciliation blocks `NOT_CASH_ACCOUNT` until the owner creates `runtime/paper-margin-acknowledged` containing exactly `ACKNOWLEDGED`. With it, cash semantics are enforced **locally**: spendable cash = broker `cash` (never buying power) minus unsettled sale proceeds minus reservations; long-only; same-session exits only as protection, within the PDT budget. Unknown multipliers still block. |
 | Default balance is $100k (any amount on reset) | `capital_cap` ($2,000): spendable cash never exceeds cap minus open basis, whatever the broker shows. Create the paper account at $2,000 anyway so the dashboard matches. |
 | Fills only when **marketable** against NBBO; a sell limit fills only when limit <= best bid | Entries are priced at the ask by the scanner. Exits are priced **at the fresh NBBO bid** (single-contract Massive snapshot, realtime, two-sided, <= 120s old); if no such bid, 95% of the broker mark as a fallback. |
 | 10% of eligible fills are random partials | Every order is qty 1, so partials cannot occur; the ledger handles them anyway. |
@@ -808,17 +816,34 @@ underlying forward:
 - **Stop**: close-based, matching the playbook's "closes back through" wording.
   Trend uses the *current* EMA20 each session; bounce and breakout use the fixed
   swing-low / range-top level. A gap through the stop exits at the worse close.
-  Same-session stop and target counts as a loss. Filling already through the
-  stop counts as a -1R loss.
+  Same-session stop and target: the stop is assumed to have hit first.
+- **No trade**: a fill already through the stop, or at/beyond the target, is
+  `no_trade` (`fill_beyond_stop` / `fill_beyond_target`). A rational executor
+  would not enter; these are counted and excluded from every statistic. The
+  old replay booked the first as a synthetic -1R and the second as a "win".
+- **Noise-level stops are refused** at the signal level (`MIN_RISK_ATR`: risk
+  must be >= 0.5 x ATR14), live and in replay. Before this, the trend signal's
+  EMA20 stop could sit cents from entry and a bounce's "swing low" was often
+  the current bar's low: an 8-cent stop turned a 1% gap into -38R and cent-wide
+  stops produced +13R "wins", inflating QQQ trend's mean 2.5x.
 - **Target**: intraday touch (high >= target for longs).
 - **Time stop**: approximated in sessions (`HOLD_LIMIT`: trend/breakout 15,
   bounce 10); exits at that session's close as `timeout` with its actual R.
 - Trades that cannot resolve before the data ends are `unresolved` and excluded.
 
-`summarize()` reports per playbook: signals, fills, wins/losses/timeouts, win
-rate, expectancy in R, average win/loss R, median sessions held, a
-`failed_breakout_rate` (breakout losses within 3 sessions), and two gates from
-the playbook: `sample_sufficient` (>= 30 resolved) and `negative_expectancy`.
+`summarize()` keeps two questions apart. **Outcome** is the sign of R (win /
+loss / flat). **Exit reason** is why the trade ended (`exits`: stop / target /
+timeout). A trend position closed by its rising EMA20 in profit is a win that
+exited on the stop rule; the old code called it a loss and could call a
+negative-R target touch a win, so `win_rate` was not what it claimed. Per
+playbook: signals, `no_fill`, `no_trade` (with reasons), resolved, wins/losses,
+`win_rate` (sign of R), `target_hit_rate`, `expectancy_r` (mean), `median_r`,
+`profit_factor`, average and max win/loss R, median sessions held,
+`failed_breakout_rate`, and the gates `sample_sufficient` (>= 30 resolved) and
+`negative_expectancy`. **Read the mean with the median and profit factor**:
+gaps through stops are open-ended in R, and a positive mean over a negative
+median (IWM trend after the audit: mean +1.0, median -0.4, one -8R gap) means
+a few trades carry the result.
 
 **What this does and does not prove.** An R-multiple here is on the underlying.
 A 1.5R underlying win can still be a losing option trade after IV crush, theta,

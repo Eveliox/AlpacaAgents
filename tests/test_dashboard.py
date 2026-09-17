@@ -170,16 +170,18 @@ class DashboardWorkspaceTests(unittest.TestCase):
             root = Path(tmp)
             report = {"level": "underlying", "options_pnl_modelled": False, "symbol": "QQQ",
                       "first_bar": "2023-01-03", "last_bar": "2026-09-16",
-                      "summary": {"trend": {"resolved": 61, "expectancy_r": 0.6254, "sample_sufficient": True}}}
+                      "summary": {"trend": {"resolved": 37, "expectancy_r": 0.2527, "median_r": -0.42, "profit_factor": 2.6,
+                                            "max_loss_r": -8.1756, "no_trade": 1, "sample_sufficient": True}}}
             (root / "bt-QQQ.json").write_text(json.dumps(report))
             (root / "bt-bad.json").write_text('{"summary":{}}')
             data = self.data(root)
             self.assertEqual(len(data["research"]), 1)
             page = render(data)
-        for text in ("0.6254", "bt-QQQ.json", "options P&amp;L is NOT modeled", "not statistical proof",
+        for text in ("0.25", "-0.42", "2.60", "-8.2", "bt-QQQ.json", "Median R", "Profit factor", "Worst R",
+                     "options P&amp;L is NOT modeled", "not statistical proof", "a few trades carry the result",
                      "No result here approves a playbook", "unsupported research report"):
             self.assertIn(text, page)
-        self.assertNotIn("$62.54", page)
+        self.assertNotIn("$25", page)
         self.assertFalse(any(data["approvals"].values()))
 
     def test_runtime_content_is_escaped_in_new_panels(self):

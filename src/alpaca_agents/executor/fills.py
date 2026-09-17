@@ -233,6 +233,18 @@ class FillLedger:
                 total += data["premium"]
         return _dollars(total)
 
+    def day_trades_since(self, day: date) -> int:
+        """Lifecycles with a buy and a sell on the same session, that session >= day (PDT counting)."""
+        if type(day) is not date:
+            raise LedgerError("Exchange session date required")
+        with self._transaction() as db:
+            rows = db.execute("""SELECT COUNT(*) FROM (
+                SELECT position_id, trading_day FROM option_fills WHERE trading_day >= ?
+                GROUP BY position_id, trading_day
+                HAVING SUM(json_extract(payload,'$.side')='buy_to_open') > 0
+                   AND SUM(json_extract(payload,'$.side')='sell_to_close') > 0)""", (day.isoformat(),)).fetchone()
+        return int(rows[0])
+
     def recorded_execution(self, execution_id: str) -> dict | None:
         """Canonical payload already booked under this execution id, or None."""
         _identifier(execution_id)

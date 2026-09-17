@@ -81,10 +81,15 @@ What to read in each output:
 
 | metric | keep if | delete playbook if |
 |---|---|---|
-| trades | >= 50 across all symbols | < 30 (no conclusion possible) |
-| expectancy (avg R) | > 0.15 | <= 0 |
-| win rate x avg win vs. loss rate x avg loss | positive | negative |
-| max consecutive losses | you could stomach 2x this | you couldn't |
+| resolved trades | >= 50 across all symbols | < 30 (no conclusion possible) |
+| mean R (`expectancy_r`) | > 0.15 | <= 0 |
+| **median R** | > 0 | < 0 while the mean is positive: outliers carry it, do not trust the mean |
+| profit factor | > 1.3 | < 1.1 |
+| worst R (`max_loss_r`) | you could take it twice in a week | you couldn't |
+| `no_trade` count | small | large: the signal fires into gaps it cannot trade |
+
+`win_rate` is the fraction of trades with positive R; `exits` says why trades
+ended. They are independent: a trade can exit on the stop rule in profit.
 
 This is **underlying-level R** (did price reach target before stop). Option
 P&L will be worse: spread, theta, and a 30-45 DTE contract that runs out of
@@ -151,7 +156,7 @@ Everything else stays the same. The guardrails you should **not** touch:
 | concurrent positions | 2 | attribution: you can tell which trade did what |
 | entries per cycle | 1 | never two orders on one signal burst |
 | daily loss breaker | $40 cumulative losses | latches for the day; wins don't reset it |
-| same-day round trips | never | swing mandate; PDT rules on a margin paper account |
+| same-session exits | premium stop only, max 3 day trades per 5 sessions | protection on day one; PDT rules on a margin account under $25k; never same-day profit-taking |
 | capital cap | $2,000 | the $100k paper balance is not your budget |
 
 If you find yourself wanting to widen these because paper "isn't real", stop.

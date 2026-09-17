@@ -31,6 +31,22 @@ class FillTests(unittest.TestCase):
     def record(self, fill):
         return self.ledger.record(fill, recorded_at=CLOSE + timedelta(days=2))
 
+    def test_day_trades_since_counts_same_session_round_trips_only(self):
+        self.record(self.buy)                        # opened 2026-09-14
+        self.record(self.sell)                       # closed 2026-09-15: NOT a day trade
+        self.assertEqual(self.ledger.day_trades_since(date(2026, 9, 1)), 0)
+        same_open = replace(self.buy, execution_id="b2", position_id="p2", contract="SPY261016C00500000",
+                            quantity=1, premium=Decimal("90"), occurred_at=CLOSE, trading_day=DAY)
+        same_close = replace(same_open, execution_id="s2", side="sell_to_close", premium=Decimal("40"),
+                             occurred_at=CLOSE + timedelta(hours=2))
+        self.record(same_open)
+        self.record(same_close)                      # opened and closed 2026-09-15: a day trade
+        self.assertEqual(self.ledger.day_trades_since(date(2026, 9, 1)), 1)
+        self.assertEqual(self.ledger.day_trades_since(DAY), 1)
+        self.assertEqual(self.ledger.day_trades_since(DAY + timedelta(days=1)), 0)   # outside the window
+        with self.assertRaises(LedgerError):
+            self.ledger.day_trades_since("2026-09-01")
+
     def test_partial_close_trips_before_position_fully_closed_and_survives_restart(self):
         self.record(self.buy)
         self.record(self.sell)

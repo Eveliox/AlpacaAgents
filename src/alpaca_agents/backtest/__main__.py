@@ -62,7 +62,11 @@ def main() -> int:
             "options_pnl_modelled": False,
             "caveats": [
                 "R-multiples are on the underlying price; option premium, IV, theta, spreads and fees are not modelled.",
-                "Stops are close-based; gaps exit at the worse close. Same-session stop+target counts as a loss.",
+                "Stops are close-based; gaps exit at the worse close. Same-session stop+target: the stop is assumed first.",
+                "win/loss is the SIGN of R; exits{stop,target,timeout} is WHY the trade ended. They are independent.",
+                "Fills already through the stop or at/beyond the target are no_trade: counted, excluded from statistics.",
+                "Signals whose stop is inside 0.5 x ATR14 are skipped (live and in replay): a noise-level stop is not a swing stop.",
+                "expectancy_r is a MEAN and is dominated by gap outliers; read median_r, profit_factor and max_loss_r with it.",
                 f"Fills occur at the next session's open or trigger touch within {MAX_FILL_SESSIONS} sessions.",
                 f"Time stops approximated in sessions: {HOLD_LIMIT}.",
                 f"A playbook needs >= {MIN_SAMPLE} resolved trades before its stats mean anything.",
@@ -74,9 +78,10 @@ def main() -> int:
         _write(output, report)
         print(f"{args.symbol}: {len(bars)} bars {bars[0].day}..{bars[-1].day}; report {output}")
         for name, stats in summary.items():
-            print(f"  {name:16s} signals={stats['signals']:4d} resolved={stats['resolved']:4d} "
-                  f"win_rate={stats['win_rate']} expectancy_r={stats['expectancy_r']} "
-                  f"sufficient={stats['sample_sufficient']}")
+            print(f"  {name:16s} signals={stats['signals']:4d} resolved={stats['resolved']:4d} no_trade={stats['no_trade']:3d} "
+                  f"win_rate={stats['win_rate']} mean_r={stats['expectancy_r']} median_r={stats['median_r']} "
+                  f"profit_factor={stats['profit_factor']} max_loss_r={stats['max_loss_r']} "
+                  f"exits={stats['exits']} sufficient={stats['sample_sufficient']}")
         return 0
     except MarketDataError as exc:
         print(str(exc), file=sys.stderr)

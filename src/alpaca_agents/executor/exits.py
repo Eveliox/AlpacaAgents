@@ -19,8 +19,16 @@ The exit order is a DAY LIMIT sell priced at the fresh NBBO bid when one is
 available (Alpaca paper fills a sell limit only when limit <= best bid), else
 at 95% of the broker mark (floored at $0.01) as a fallback.
 
-No same-trading-day round trips: a position opened today is never exited
-today (swing mandate, and a margin paper account under $25k is PDT-exposed).
+Same-session exits. On the session a position was opened, the underlying
+rules have nothing new to say (their close is the signal session's, which by
+construction is not through the stop), so only the PREMIUM STOP is evaluated
+that day, and only as protection: never target or time exits. A same-session
+exit is a day trade; a margin account under $25k may make at most 3 in any
+5 business days before PDT restrictions apply, so the caller passes the count
+already used in the rolling window and the rule refuses the 4th. A long
+option's loss is bounded by its premium either way; this rule only decides
+whether the -50% stop protects on day one (yes, within the budget) or the
+position rides to the next session (when the budget is spent).
 """
 from dataclasses import dataclass
 from datetime import date
@@ -32,6 +40,8 @@ from alpaca_agents.scanner.indicators import ema
 
 OCC = re.compile(r"[A-Z]{1,6}[0-9]{6}[CP][0-9]{8}")
 CENT = Decimal("0.01")
+PDT_DAY_TRADE_LIMIT = 3     # day trades allowed per rolling 5 business days under $25k equity
+PDT_WINDOW_SESSIONS = 5
 
 
 @dataclass(frozen=True)
@@ -72,8 +82,12 @@ def exit_limit(mark: Decimal | None, bid: Decimal | None = None) -> str:
     return format(max(price, CENT), ".2f")
 
 
-def evaluate_exit(held: HeldOption, idea: dict, *, trading_day: date) -> tuple[dict | None, str]:
-    """Return (decision, note). decision is None when no rule fires or inputs are unusable."""
+def evaluate_exit(held: HeldOption, idea: dict, *, trading_day: date, day_trades_used: int = 0) -> tuple[dict | None, str]:
+    """Return (decision, note). decision is None when no rule fires or inputs are unusable.
+
+    day_trades_used: same-session round trips already booked in the rolling
+    PDT window (including today). Only consulted for a same-session exit.
+    """
     try:
         if not isinstance(held, HeldOption) or not OCC.fullmatch(held.contract):
             return None, "invalid position"
@@ -81,8 +95,9 @@ def evaluate_exit(held: HeldOption, idea: dict, *, trading_day: date) -> tuple[d
             return None, "invalid quantity or day"
         if type(held.entry_day) is not date or held.entry_day > trading_day:
             return None, "invalid entry day"
-        if held.entry_day == trading_day:
-            return None, "opened this session; no same-day round trips"
+        if type(day_trades_used) is not int or day_trades_used < 0:
+            return None, "invalid day-trade count"
+        same_session = held.entry_day == trading_day
         if not isinstance(idea, dict) or idea.get("strategy") not in ("long_call", "long_put"):
             return None, "exit rules cover long single-leg ideas only"
         plan = idea.get("exit_plan")
@@ -106,7 +121,21 @@ def evaluate_exit(held: HeldOption, idea: dict, *, trading_day: date) -> tuple[d
         close = None if held.underlying_close is None else _dec(held.underlying_close)
 
         reason, detail = None, None
-        if close is not None:
+        if same_session:
+            # Only the premium stop has same-session information; it is protection, not profit-taking.
+            pct = plan.get("premium_stop_pct")
+            if mark is not None and type(pct) is int and 0 < pct < 100:
+                floor = (basis * (100 - pct) / 100).quantize(CENT, rounding=ROUND_HALF_UP)
+                if mark * 100 <= floor:
+                    if day_trades_used >= PDT_DAY_TRADE_LIMIT:
+                        return None, (f"premium_stop fired (mark {mark}*100 <= {floor}) but {day_trades_used} day trades already used "
+                                      f"in {PDT_WINDOW_SESSIONS} sessions; holding to next session (loss bounded by premium)")
+                    reason = "premium_stop"
+                    detail = (f"mark {mark}*100 <= {floor} ({pct}% of basis {basis}); same-session protective exit, "
+                              f"day trade {day_trades_used + 1} of {PDT_DAY_TRADE_LIMIT}")
+            if reason is None:
+                return None, f"opened this session; holding (premium stop only today, mark {mark})"
+        if reason is None and close is not None:
             if (direction == "long" and close <= stop) or (direction == "short" and close >= stop):
                 reason, detail = "underlying_stop", f"close {close} vs stop {stop}"
         if reason is None and close is not None and held.bars:
