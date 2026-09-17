@@ -2,7 +2,8 @@
 
 Start by reading `HANDOVER.md`. It has the current state, account facts, audited
 backtest numbers, the next milestones, and the invariants. `README.md` is the
-full reference; `PLAYBOOK.md` is the operator routine.
+full reference; `PLAYBOOK.md` is the operator routine. The current task spec is
+`docs/TASK-chat-server.md`.
 
 ## Hard rules (do not relax without the owner's explicit, written decision)
 

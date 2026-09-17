@@ -118,6 +118,8 @@ CI: `.github/workflows/tests.yml` runs Python 3.11–3.13 + Node tests.
 
 ## 9. Next work — the agreed blueprint (owner asked for this; not started)
 
+**Executable spec with acceptance criteria and a kickoff prompt: `docs/TASK-chat-server.md`.**
+
 Goal: ask Star "give me a rundown of today with charts" and ask Houston "what
 are you looking for / place this trade" **from the chat**.
 
