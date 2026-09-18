@@ -124,8 +124,8 @@ class _LoopbackServer(ThreadingHTTPServer):
 
 
 class Studio:
-    def __init__(self, runtime: Path, *, cycle=None, every=None, clock=None, llm=None):
-        self.runtime, self.cycle, self.every, self.llm = runtime, cycle, every, llm
+    def __init__(self, runtime: Path, *, cycle=None, every=None, clock=None, llm=None, market=None):
+        self.runtime, self.cycle, self.every, self.llm, self.market = runtime, cycle, every, llm, market
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.token = secrets.token_urlsafe(32)
         self.jobs = Queue(maxsize=16)
@@ -205,7 +205,7 @@ class Studio:
         return display_snapshot(collect(self.runtime, now=self.clock()))
 
     def context(self, d):
-        context = conversation_data(d, AGENTS, live=True)
+        context = conversation_data(d, AGENTS, live=True, generative=self.llm is not None)
         context['topics']['briefing']['text'] += '\nController schedule: ' + self.schedule + '.'
         return context
 
@@ -240,7 +240,7 @@ class Studio:
             context = self.context(d)
             if self.llm is not None:
                 from .llm_chat import ReadOnlyTools
-                reply = self.llm.ask(agent, text, tools=ReadOnlyTools(self.runtime, lambda: d), snapshot=d,
+                reply = self.llm.ask(agent, text, tools=ReadOnlyTools(self.runtime, lambda: d, market=self.market), snapshot=d,
                                      fallback=lambda: answer_for(text, agent, context))
             else:
                 reply = dict(answer_for(text, agent, context))
@@ -384,10 +384,25 @@ def serve(runtime, *, cycle, every=None):
     import sys
     from .llm_chat import LLMChat
     llm = LLMChat.from_environment()
-    app = Studio(runtime, cycle=cycle, every=every, llm=llm).start()
+    market = None
+    if llm is not None:
+        from .marketdata.client import DataCredentials, JsonlAudit, MarketDataClient, MarketDataError
+        try:
+            credentials = DataCredentials.from_environment()
+            cached = []
+
+            def market():
+                # Built lazily on the worker; one client for the server's lifetime.
+                if not cached:
+                    cached.append(MarketDataClient(credentials, audit=JsonlAudit(runtime / "market-data.jsonl")))
+                return cached[0]
+        except MarketDataError:
+            market = None
+    app = Studio(runtime, cycle=cycle, every=every, llm=llm, market=market).start()
     print(f"Paper workspace: {app.url}/", file=sys.stderr, flush=True)
     if llm is not None:
         print(f"Generative chat: ON ({llm.model}, daily cap {llm.daily_cap}). Questions and sanitized local records go to Anthropic. No order tools.", file=sys.stderr, flush=True)
+        print("Market narration: " + ("ON (stock snapshots + news via Massive)" if market else "off (MASSIVE_API_KEY not loaded)"), file=sys.stderr, flush=True)
     else:
         print("Generative chat: off (set ANTHROPIC_API_KEY to enable). Rule-based replies only.", file=sys.stderr, flush=True)
     print(f"Local session token (do not share): {app.token}", file=sys.stderr, flush=True)

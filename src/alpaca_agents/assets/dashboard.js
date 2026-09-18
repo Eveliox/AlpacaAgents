@@ -60,6 +60,7 @@
     data.schedule = studio.schedule;
   }
   let pending = false;
+  let pendingAgent = null;
   let generation = 0;
   let connected = true;
   async function request(route, body) {
@@ -86,15 +87,96 @@
     if (!threads.has(active)) threads.set(active, [{who: "agent", text: persona().intro, source: "Local, rule-based guide · no generative model connected"}]);
     return threads.get(active);
   }
+  // Markdown-lite rendered as DOM nodes only: bold, inline code, bullets, numbered
+  // lists, headings, https links. Built with createElement only; model/news text is untrusted.
+  function inline(text, target) {
+    const pattern = /(\*\*[^*\n]+\*\*|`[^`\n]+`|https:\/\/[^\s<>()\]]+)/g;
+    let last = 0, match;
+    while ((match = pattern.exec(text)) !== null) {
+      if (match.index > last) target.append(text.slice(last, match.index));
+      const token = match[0];
+      if (token.startsWith("**")) {
+        const strong = document.createElement("strong");
+        strong.textContent = token.slice(2, -2);
+        target.append(strong);
+      } else if (token.startsWith("`")) {
+        const code = document.createElement("code");
+        code.textContent = token.slice(1, -1);
+        target.append(code);
+      } else {
+        const link = document.createElement("a");
+        const clean = token.replace(/[.,;:!?]+$/, "");
+        link.href = clean;
+        link.textContent = clean.replace(/^https:\/\//, "").slice(0, 60) + (clean.length > 68 ? "\u2026" : "");
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.title = "Opens the publisher's site in a new tab";
+        target.append(link);
+        if (clean.length !== token.length) target.append(token.slice(clean.length));
+      }
+      last = match.index + token.length;
+    }
+    if (last < text.length) target.append(text.slice(last));
+  }
+  function renderBody(text) {
+    const root = document.createElement("div");
+    root.className = "message-body";
+    let list = null, paragraph = null;
+    for (const raw of String(text).split("\n")) {
+      const line = raw.replace(/\s+$/, "");
+      const bullet = /^\s*(?:[-*\u2022]|\d+[.)])\s+(.*)$/.exec(line);
+      const heading = /^#{1,4}\s+(.*)$/.exec(line);
+      if (bullet) {
+        paragraph = null;
+        if (!list) { list = document.createElement(/^\s*\d/.test(line) ? "ol" : "ul"); root.append(list); }
+        const li = document.createElement("li");
+        inline(bullet[1], li);
+        list.append(li);
+      } else if (heading) {
+        list = null; paragraph = null;
+        const h = document.createElement("p");
+        h.className = "message-heading";
+        inline(heading[1], h);
+        root.append(h);
+      } else if (line.trim() === "") {
+        list = null; paragraph = null;
+      } else {
+        list = null;
+        if (!paragraph) { paragraph = document.createElement("p"); root.append(paragraph); }
+        else paragraph.append(document.createElement("br"));
+        inline(line, paragraph);
+      }
+    }
+    return root;
+  }
+  function stamp(date) {
+    return date.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  }
   function drawMessage(message) {
     const item = document.createElement("div");
     item.className = `chat-message ${message.who === "user" ? "from-user" : "from-agent"}`;
+    const head = document.createElement("div");
+    head.className = "message-head";
+    if (message.who !== "user") {
+      const face = document.createElement("span");
+      face.className = "message-avatar";
+      face.style.backgroundImage = `url("${persona().avatar}")`;
+      face.setAttribute("aria-hidden", "true");
+      head.append(face);
+    }
     const label = document.createElement("span");
     label.className = "message-name";
     label.textContent = message.who === "user" ? "You" : persona().name;
-    const body = document.createElement("p");
-    body.textContent = message.text;
-    item.append(label, body);
+    head.append(label);
+    if (message.at) {
+      const time = document.createElement("time");
+      time.className = "message-time";
+      time.textContent = stamp(new Date(message.at));
+      head.append(time);
+    }
+    const body = message.who === "user" ? document.createElement("p") : renderBody(message.text);
+    if (message.who === "user") body.textContent = message.text;
+    item.append(head, body);
     // Chart payloads are isolated image documents, never DOM/SVG markup.
     if (Array.isArray(message.charts)) message.charts.slice(0, 6).forEach(svg => {
       if (typeof svg !== 'string' || svg.length > 200000) return;
@@ -115,7 +197,31 @@
   function drawHistory() {
     log.replaceChildren();
     history().forEach(drawMessage);
+    if (pending && pendingAgent === active) drawThinking();
     log.scrollTop = log.scrollHeight;
+  }
+  function drawThinking() {
+    const item = document.createElement("div");
+    item.className = "chat-message from-agent thinking";
+    item.setAttribute("aria-live", "polite");
+    const face = document.createElement("span");
+    face.className = "message-avatar";
+    face.style.backgroundImage = `url("${persona().avatar}")`;
+    const text = document.createElement("span");
+    text.textContent = `${persona().name} is ${studio && studio.generative ? "reading records and data feeds" : "checking records"}`;
+    const dots = document.createElement("span");
+    dots.className = "dots";
+    dots.textContent = "\u2022\u2022\u2022";
+    item.append(face, text, dots);
+    log.append(item);
+  }
+  function drawUsage(usage) {
+    const meter = document.getElementById("chat-usage");
+    if (!meter) return;
+    if (usage && typeof usage.calls === "number") {
+      meter.textContent = `${usage.calls} / ${usage.cap} model calls today`;
+      meter.hidden = false;
+    }
   }
   function selectAgent(id, focus = false) {
     if (!data.agents.some(a => a.id === id)) return;
@@ -147,27 +253,30 @@
     if (!original || pending) return;
     const question = redactSecrets(original);
     const agent = active, epoch = generation, messages = history();
-    messages.push({who: 'user', text: question});
+    messages.push({who: 'user', text: question, at: Date.now()});
     input.value = '';
-    drawHistory();
     let answer;
     if (question !== original) {
       answer = {text: "I hid a possible credential or long token. Don't paste secrets into chat; rotate a key if it was exposed. No message was transmitted or saved to disk.", source: 'Local privacy guard'};
     } else if (studio) {
       pending = true;
+      pendingAgent = agent;
       form.setAttribute('aria-busy', 'true');
       document.getElementById('chat-send').disabled = true;
+      drawHistory();
       try {
         answer = await request('/api/ask', {agent, text: question});
         if (typeof answer.text !== 'string' || typeof answer.source !== 'string') throw new Error('Invalid reply');
         if ('last_cycle' in answer) data.last_cycle = answer.last_cycle;
         if ('schedule' in answer) data.schedule = answer.schedule;
+        if (answer.llm_usage) drawUsage(answer.llm_usage);
         connected = true;
       } catch {
         connected = false;
         answer = {text: 'Local server unavailable or request refused. Current state is unknown. No automatic retry was made; inspect local records before trying a diagnostic again.', source: 'Local connection status'};
       } finally {
         pending = false;
+        pendingAgent = null;
         form.setAttribute('aria-busy', 'false');
         document.getElementById('chat-send').disabled = false;
         updateAge();
@@ -175,8 +284,8 @@
     } else {
       answer = answerFor(question, agent, data);
     }
-    if (epoch !== generation) return; // Clear means clear, including replies in flight.
-    messages.push({who: 'agent', ...answer});
+    if (epoch !== generation) { if (active === agent) drawHistory(); return; } // Clear means clear, including replies in flight.
+    messages.push({who: 'agent', at: Date.now(), ...answer});
     if (messages.length > 41) messages.splice(1, messages.length - 41);
     if (active === agent) drawHistory();
   }
@@ -232,6 +341,15 @@
       : `Snapshot rendered ${Math.floor(elapsed / 60000)} min ago · not live`;
     document.getElementById("chat-snapshot").textContent = text;
   }
+  const expand = document.getElementById("chat-expand");
+  if (expand) {
+    expand.disabled = false;
+    expand.addEventListener("click", () => {
+      const wide = document.body.classList.toggle("chat-wide");
+      expand.textContent = wide ? "Shrink chat" : "Expand chat";
+      expand.setAttribute("aria-pressed", String(wide));
+    });
+  }
   input.disabled = false;
   document.getElementById("chat-send").disabled = false;
   clear.disabled = false;
@@ -243,6 +361,7 @@
         const current = await request('/api/snapshot');
         data.last_cycle = current.last_cycle;
         data.schedule = current.schedule;
+        if (current.llm_usage) drawUsage(current.llm_usage);
         connected = true;
       } catch { connected = false; }
     }

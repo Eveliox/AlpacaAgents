@@ -19,7 +19,7 @@ Repo: https://github.com/Eveliox/AlpacaAgents
 | 3 Executor | `executor/` | **Houston** | Only broker boundary. Paper URL hardcoded. Journal with reserve→claim→submit, single-use auth, stored bodies. Reconciliation with real checks. Exit manager. Manual `release-intent` / `flatten`. |
 | 4 Dashboard | `dashboard*.py`, `assets/` | **Astra** | Static HTML, charcoal/gold. Agent avatars (owner's artwork). Offline rule-based chat (NOT an LLM). CSP, no network, no forms. |
 | Orchestration | `controller.py` | — | One cycle or `--every N` loop. Runtime lock (one controller per dir). Never submits without `--submit`. |
-| Generative agents | `llm_chat.py` | all four | Optional. Anthropic Messages API via stdlib HTTPS. Tools: read_snapshot/read_backtest/read_cycles/explain_rule only. Falls back to the rule router. Off without `ANTHROPIC_API_KEY`. |
+| Generative agents | `llm_chat.py` | all four | Optional. Anthropic Messages API via stdlib HTTPS. Tools: read_snapshot/read_backtest/read_cycles/explain_rule, plus read_market/read_news through the allowlisted Massive client when its key is loaded. Falls back to the rule router. Off without `ANTHROPIC_API_KEY`. |
 | Local chat server | `studio.py` | — | `controller --serve`, loopback-only, fresh local records per question, token/Origin/Host guards. Exact Houston `reconcile` requests a dry diagnostic. No order routes. |
 | Backtest | `backtest/` | — | Underlying-level walk-forward replay. **Audited** (see §4). Options P&L NOT modelled. |
 

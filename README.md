@@ -509,8 +509,16 @@ to its premium stop?"*, and follow-ups — each agent keeps the last 10 turns in
 process memory.
 
 What the model can do is decided by code, not by the prompt. It has exactly
-four **read-only tools**: `read_snapshot` (the same sanitized projection the
-page shows), `read_backtest(symbol)`, `read_cycles(limit)`, `explain_rule(topic)`.
+six **read-only tools**: `read_snapshot` (the same sanitized projection the
+page shows), `read_backtest(symbol)`, `read_cycles(limit)`, `explain_rule(topic)`,
+and — when `MASSIVE_API_KEY` is also loaded — `read_market(symbols)` (today's
+stock snapshot: last, OHLCV, previous close, change, data timestamp) and
+`read_news(symbol?, limit)` (headlines with publisher, time, URL). So *"What
+happened in the market today?"* gets real index moves and attributed
+headlines from the licensed feed, then what the system did. Headlines are
+third-party text: the model is told to attribute them, never verify them, and
+the page renders their URLs as plain links you choose to click. Market
+narration is never an input to any trading decision.
 There is no tool for orders, journal, controls, approvals, keys, shell or file
 writes; an attempt to call one returns an error to the model. Tool results and
 replies pass through the credential redactor; anything that looks like a key in
@@ -527,8 +535,12 @@ replies pass through the credential redactor; anything that looks like a key in
 - Replies are text about *saved records*; the model is told to say "I don't have
   that record" rather than guess, and gives no trade recommendations. Verify
   anything that matters against the panels and the broker UI.
-- Tests use a scripted fake transport; CI never calls the API. Hostile-prompt
-  tests assert no tool other than the four exists and no runtime file changes.
+- Tests use a scripted fake transport and a fake data client; CI never calls
+  either API. Hostile-prompt tests assert no tool outside the six exists and
+  no runtime file changes.
+- The chat panel renders bold, lists, headings and https links (DOM nodes,
+  never HTML injection), shows who is "thinking", stamps messages, has an
+  **Expand chat** toggle, and a model-calls-today meter.
 
 #### Offline snapshot (existing launcher)
 

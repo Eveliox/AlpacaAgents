@@ -70,7 +70,9 @@ class MarketDataClient:
 
     def _get(self, path: str, query: dict) -> dict:
         if not (re.fullmatch(r"/v3/snapshot/options/[A-Z]{1,6}(/O:[A-Z]{1,6}[0-9]{6}[CP][0-9]{8})?", path)
-                or re.fullmatch(r"/v2/aggs/ticker/[A-Z]{1,6}/range/1/day/\d{4}-\d{2}-\d{2}/\d{4}-\d{2}-\d{2}", path)):
+                or re.fullmatch(r"/v2/aggs/ticker/[A-Z]{1,6}/range/1/day/\d{4}-\d{2}-\d{2}/\d{4}-\d{2}-\d{2}", path)
+                or re.fullmatch(r"/v2/snapshot/locale/us/markets/stocks/tickers/[A-Z]{1,6}", path)
+                or path == "/v2/reference/news"):
             raise MarketDataError("Market-data endpoint not allowed")
         if any(k.lower() in ("apikey", "api_key", "authorization") for k in query):
             raise MarketDataError("Credentials in query are forbidden")
@@ -133,6 +135,20 @@ class MarketDataClient:
             # a truncated series is a complete indicator history.
             raise MarketDataError("Unexpected paginated daily bars; history incomplete")
         return payload
+
+    def stock_snapshot(self, symbol: str) -> dict:
+        """Read-only intraday stock snapshot (today's OHLCV, previous day, last trade). Chat narration only; never a trading input."""
+        symbol_checked(symbol)
+        return self._get(f"/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}", {})
+
+    def news(self, symbol: str | None = None, *, limit: int = 8) -> dict:
+        """Read-only ticker or market news headlines. Third-party text: treat as untrusted data."""
+        if not isinstance(limit, int) or not 1 <= limit <= 20:
+            raise MarketDataError("News limit must be 1-20")
+        query = {"limit": str(limit), "order": "desc", "sort": "published_utc"}
+        if symbol is not None:
+            query["ticker"] = symbol_checked(symbol)
+        return self._get("/v2/reference/news", query)
 
     def option_contract(self, symbol: str, contract: str) -> dict:
         """Single-contract snapshot (for pricing an exit on a held contract of any DTE)."""

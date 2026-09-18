@@ -84,7 +84,7 @@ class LLMChatTests(unittest.TestCase):
         self.assertNotIn("TESTKEY", repr(chat.transport.__dict__).replace("sk-ant-TESTKEY", "") + json.dumps(reply))
 
     def test_prompt_and_tool_schema_are_read_only(self):
-        self.assertEqual(TOOL_NAMES, {"read_snapshot", "read_backtest", "read_cycles", "explain_rule"})
+        self.assertEqual(TOOL_NAMES, {"read_snapshot", "read_backtest", "read_cycles", "explain_rule", "read_market", "read_news"})
         for tool in TOOLS:
             self.assertFalse(tool["input_schema"].get("additionalProperties", True))
         for agent, persona in PERSONAS.items():
@@ -127,6 +127,58 @@ class LLMChatTests(unittest.TestCase):
         self.assertIn("not available", errors[0]["error"])
         self.assertEqual(list(self.rt.iterdir()), [])
         self.assertEqual(self.fallback_calls, 0)
+
+    def test_market_and_news_tools_are_read_only_bounded_and_off_without_key(self):
+        from alpaca_agents.marketdata.client import MarketDataError
+        tools = ReadOnlyTools(self.rt, lambda: self.snapshot)  # no market client
+        for name, args in (("read_market", {"symbols": ["SPY"]}), ("read_news", {})):
+            result, err = tools.run(name, args)
+            self.assertFalse(err)
+            self.assertFalse(result["available"])
+            self.assertIn("not loaded", result["note"])
+
+        class FakeData:
+            def __init__(self):
+                self.calls = []
+            def stock_snapshot(self, symbol):
+                self.calls.append(("snap", symbol))
+                if symbol == "BAD":
+                    raise MarketDataError("Market data http_error; status=403")
+                return {"status": "OK", "ticker": {"ticker": symbol, "todaysChange": 1.23, "todaysChangePerc": 0.21, "updated": 1_789_000_000_000_000_000,
+                                                   "day": {"o": 580.0, "h": 585.5, "l": 579.1, "c": 584.2, "v": 41_000_000}, "prevDay": {"c": 582.97},
+                                                   "lastTrade": {"p": 584.2, "secret": "private-trade-id"}, "min": {"c": 584.1}}}
+            def news(self, symbol=None, *, limit=8):
+                self.calls.append(("news", symbol, limit))
+                return {"status": "OK", "results": [{"title": "Stocks rise as api_key=LEAKED yields fall", "publisher": {"name": "Wire", "homepage_url": "x"},
+                                                     "published_utc": "2026-09-18T14:00:00Z", "article_url": "https://example.com/a", "description": "d" * 900,
+                                                     "tickers": ["SPY", "QQQ"], "insights": [{"sentiment": "positive", "reasoning": "private-reasoning"}]},
+                                                    {"title": "javascript one", "article_url": "javascript:alert(1)", "publisher": "notadict"}]}
+        fake = FakeData()
+        tools = ReadOnlyTools(self.rt, lambda: self.snapshot, market=lambda: fake)
+        result, err = tools.run("read_market", {"symbols": ["SPY", "BAD", "SPY"]})
+        self.assertFalse(err)
+        self.assertEqual([q["symbol"] for q in result["quotes"]], ["SPY", "BAD"])
+        spy = result["quotes"][0]
+        self.assertEqual((spy["last"], spy["previous_close"], spy["change_percent"]), (584.2, 582.97, 0.21))
+        self.assertEqual(spy["data_time_utc"], "2026-09-10T00:26:40+00:00")
+        self.assertNotIn("private-trade-id", json.dumps(result))
+        self.assertFalse(result["quotes"][1]["available"])
+        self.assertTrue(tools.run("read_market", {"symbols": ["spy"]})[1])
+        self.assertTrue(tools.run("read_market", {"symbols": ["A"] * 7})[1])
+        news, err = tools.run("read_news", {"symbol": "QQQ", "limit": 2})
+        self.assertFalse(err)
+        self.assertEqual(fake.calls[-1], ("news", "QQQ", 2))
+        self.assertEqual(len(news["items"][0]["description"]), 400)
+        self.assertEqual(news["items"][0]["url"], "https://example.com/a")
+        self.assertIsNone(news["items"][1]["url"])
+        self.assertNotIn("private-reasoning", json.dumps(news))
+        # The model-facing string is redacted by the chat loop, not only by projection.
+        chat = self.chat(tool_call("read_news", {"symbol": "QQQ"}), text_reply("Wire reported yields fell."))
+        reply = chat.ask("star", "any news?", tools=tools, snapshot=self.snapshot, fallback=self.fallback)
+        self.assertIn("read_news(QQQ)", reply["source"])
+        self.assertNotIn("LEAKED", json.dumps(self.transport.payloads))
+        self.assertTrue(tools.run("read_news", {"limit": 11})[1])
+        self.assertTrue(tools.run("read_news", {"symbol": "../x"})[1])
 
     def test_read_backtest_only_projects_supported_reports(self):
         (self.rt / "bt-QQQ.json").write_text(json.dumps({"symbol": "QQQ", "level": "underlying", "options_pnl_modelled": False,

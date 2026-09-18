@@ -24,6 +24,12 @@ PROMPTS = {
     "moon": ["Explain my risk limits", "Can I trust these results?", "What does DISABLED mean?"],
     "astra": ["Give me a briefing", "What should I do next?", "Show recent notifications"],
 }
+GENERATIVE_PROMPTS = {
+    "houston": ["Show my positions", "Why aren't we trading?", "What would you need to see before you'd place a trade?"],
+    "star": ["What happened in the market today?", "Any major news on QQQ?", "Compare my QQQ and SPY backtests — which do you trust less?"],
+    "moon": ["What would you refuse right now, and why?", "Explain same-day exits", "Walk me through the breaker"],
+    "astra": ["Give me today's briefing: market, news, then our system", "What should I do next?", "Anything in the notifications I should worry about?"],
+}
 
 
 @lru_cache(maxsize=4)
@@ -86,7 +92,7 @@ def answer_for(question, agent_id, data):
     return data['topics']['help']
 
 
-def conversation_data(d, agents, *, live=False):
+def conversation_data(d, agents, *, live=False, generative=False):
     """Precompute auditable answers; JS only selects a topic, never invents facts."""
     last = d["cycles"][0] if d["cycles"] else {}
     rec = _obj(_obj(last.get("stages")).get("reconcile"))
@@ -210,8 +216,10 @@ def conversation_data(d, agents, *, live=False):
     return {"rendered_at": d["now"].isoformat(), "live": live,
             "last_cycle": last.get('finished_at'), "topics": topics, "research": by_symbol,
             "agents": [{"id": key, "name": name, "role": role, "avatar": avatar_uri(key),
-                        "intro": f"I'm {name}'s dashboard guide. My specialty: {role.lower()}. Ask me to explain the saved records; I cannot operate the trading system.",
-                        "prompts": PROMPTS[key]} for key, name, role, description in agents]}
+                        "intro": (f"{name} here — {role.lower()}. Ask me anything about the market today, the news, or what this system has recorded. "
+                                  "I read records and data feeds; I can't place or change trades.") if generative else
+                                 f"I'm {name}'s dashboard guide. My specialty: {role.lower()}. Ask me to explain the saved records; I cannot operate the trading system.",
+                        "prompts": (GENERATIVE_PROMPTS if generative else PROMPTS)[key]} for key, name, role, description in agents]}
 
 
 def safe_json(data):
@@ -227,7 +235,7 @@ def script_policy(*, live=False):
 
 
 def render_chat(d, agents, *, studio=None):
-    data = conversation_data(d, agents, live=studio is not None)
+    data = conversation_data(d, agents, live=studio is not None, generative=bool(studio and studio.get('generative')))
     if studio is not None:
         data['studio'] = studio  # In-memory HTTP bootstrap only; never written by build().
     javascript = files("alpaca_agents").joinpath("assets", "dashboard.js").read_text(encoding="utf-8")
@@ -241,7 +249,7 @@ def render_chat(d, agents, *, studio=None):
 <div id="chat-log" role="log" aria-live="polite" aria-relevant="additions" aria-label="Agent conversation" tabindex="0"><p class="chat-placeholder">Select a suggested question or type below. Enable JavaScript for local chat; the dashboard remains usable without it.</p></div>
 <div id="chat-prompts" aria-label="Suggested questions"></div>
 <form id="chat-form"><label class="chat-label" for="chat-input">Ask about your workspace</label><div class="composer"><textarea id="chat-input" rows="2" maxlength="800" placeholder="Why aren't we trading?" required disabled></textarea><button id="chat-send" type="submit" disabled aria-label="Send message">↗</button></div></form>
-<div class="chat-bottom"><span>Read-only · no network · no orders</span><button id="chat-clear" type="button" disabled>Clear chat</button></div>
+<div class="chat-bottom"><span>Read-only · no network · no orders</span><span id="chat-usage" hidden></span><span class="chat-buttons"><button id="chat-expand" type="button" aria-pressed="false" disabled>Expand chat</button><button id="chat-clear" type="button" disabled>Clear chat</button></span></div>
 <p class="chat-privacy">Don’t paste keys. Messages stay in memory and clear on refresh. Replies use only the saved snapshot and supported topics.</p>
 <noscript><p class="notice">Local chat needs JavaScript. No remote service or API key is required.</p></noscript></aside>'''
     if studio is not None:
