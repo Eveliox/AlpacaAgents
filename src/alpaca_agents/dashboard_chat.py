@@ -24,7 +24,10 @@ PROMPTS = {
     "moon": ["Explain my risk limits", "Can I trust these results?", "What does DISABLED mean?"],
     "astra": ["Give me a briefing", "What should I do next?", "Show recent notifications"],
 }
+NOVA = ("nova", "Nova", "General assistant", "Ask anything: markets, options concepts, today's news, or how this system works. Generative mode only.")
 GENERATIVE_PROMPTS = {
+    "nova": ["What happened in the market today?", "Explain how a long call can lose money while the stock rises",
+             "What should I understand before trading options?"],
     "houston": ["Show my positions", "Why aren't we trading?", "What would you need to see before you'd place a trade?"],
     "star": ["What happened in the market today?", "Any major news on QQQ?", "Compare my QQQ and SPY backtests — which do you trust less?"],
     "moon": ["What would you refuse right now, and why?", "Explain same-day exits", "Walk me through the breaker"],
@@ -32,8 +35,17 @@ GENERATIVE_PROMPTS = {
 }
 
 
-@lru_cache(maxsize=4)
+NOVA_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 110 124" width="110" height="124">'
+            '<rect width="110" height="124" rx="16" fill="#2a2d33"/>'
+            '<circle cx="55" cy="60" r="34" fill="#1c1f23" stroke="#c9a961" stroke-width="3"/>'
+            '<path d="M55 30 L62 52 L85 60 L62 68 L55 90 L48 68 L25 60 L48 52 Z" fill="#c9a961"/>'
+            '<circle cx="55" cy="60" r="6" fill="#f1e6c8"/></svg>')
+
+
+@lru_cache(maxsize=8)
 def avatar_uri(agent):
+    if agent == "nova":
+        return "data:image/svg+xml;base64," + base64.b64encode(NOVA_SVG.encode("utf-8")).decode("ascii")
     if agent not in ART:
         raise ValueError("Unknown display agent")
     raw = files("alpaca_agents").joinpath("assets", f"{agent}.png").read_bytes()
@@ -213,13 +225,15 @@ def conversation_data(d, agents, *, live=False, generative=False):
                                   'not live quotes. Ask Houston exactly "reconcile" for a dry diagnostic cycle. No orders, controls or approvals from chat. Never paste keys.')
         topics['safety']['text'] = ("I can't place, approve, cancel or change trades, controls, limits or keys. Chat has no order route. "
                                     'Only Houston\'s exact "reconcile" command requests a dry controller check; it cannot submit orders.')
+    chat_agents = list(agents) + ([NOVA] if generative else [])
     return {"rendered_at": d["now"].isoformat(), "live": live,
             "last_cycle": last.get('finished_at'), "topics": topics, "research": by_symbol,
+            "default_agent": "nova" if generative else "astra",
             "agents": [{"id": key, "name": name, "role": role, "avatar": avatar_uri(key),
                         "intro": (f"{name} here — {role.lower()}. Ask me anything about the market today, the news, or what this system has recorded. "
                                   "I read records and data feeds; I can't place or change trades.") if generative else
                                  f"I'm {name}'s dashboard guide. My specialty: {role.lower()}. Ask me to explain the saved records; I cannot operate the trading system.",
-                        "prompts": (GENERATIVE_PROMPTS if generative else PROMPTS)[key]} for key, name, role, description in agents]}
+                        "prompts": (GENERATIVE_PROMPTS if generative else PROMPTS)[key]} for key, name, role, description in chat_agents]}
 
 
 def safe_json(data):
@@ -240,11 +254,16 @@ def render_chat(d, agents, *, studio=None):
         data['studio'] = studio  # In-memory HTTP bootstrap only; never written by build().
     javascript = files("alpaca_agents").joinpath("assets", "dashboard.js").read_text(encoding="utf-8")
     csp = script_policy(live=studio is not None)
-    options = "".join(f'<option value="{key}"{" selected" if key == "astra" else ""}>{name} · {html.escape(role)}</option>' for key, name, role, _ in agents)
+    generative = bool(studio and studio.get('generative'))
+    default = "nova" if generative else "astra"
+    chat_agents = list(agents) + ([NOVA] if generative else [])
+    options = "".join(f'<option value="{key}"{" selected" if key == default else ""}>{name} · {html.escape(role)}</option>' for key, name, role, _ in chat_agents)
+    persona_key, persona_name, persona_role, _ = next(a for a in chat_agents if a[0] == default)
+    nova_button = ('<button class="nova-button" type="button" data-chat-agent="nova" disabled>✦ Ask Nova anything</button>' if generative else "")
     markup = f'''<aside class="chat-dock" id="agent-chat" aria-labelledby="chat-title">
 <div class="chat-heading"><span class="eyebrow">Your crew, one conversation away</span><h2 id="chat-title">Talk to your agents</h2><p>Local snapshot guide · not generative AI</p></div>
 <label class="chat-label" for="chat-agent">Choose your agent</label><select id="chat-agent">{options}</select>
-<div class="chat-persona"><img id="chat-avatar" src="{avatar_uri('astra')}" alt="Astra avatar" width="58" height="64"><div><strong id="chat-name">Astra</strong><span id="chat-role">Dashboard &amp; Notifications</span></div><span class="local-badge">LOCAL</span></div>
+<div class="chat-persona"><img id="chat-avatar" src="{avatar_uri(persona_key)}" alt="{persona_name} avatar" width="58" height="64"><div><strong id="chat-name">{persona_name}</strong><span id="chat-role">{html.escape(persona_role)}</span></div><span class="local-badge">LOCAL</span></div>{nova_button}
 <p class="chat-snapshot" id="chat-snapshot">Saved snapshot · not live market data</p>
 <div id="chat-log" role="log" aria-live="polite" aria-relevant="additions" aria-label="Agent conversation" tabindex="0"><p class="chat-placeholder">Select a suggested question or type below. Enable JavaScript for local chat; the dashboard remains usable without it.</p></div>
 <div id="chat-prompts" aria-label="Suggested questions"></div>

@@ -502,7 +502,11 @@ $env:ANTHROPIC_API_KEY = "sk-ant-..."      # keep it in keys.ps1, never in the r
 python -m alpaca_agents.controller --runtime runtime --serve
 ```
 
-The terminal prints `Generative chat: ON (model, daily cap)`. Ask things like
+The terminal prints `Generative chat: ON (model, daily cap)`. A fifth persona,
+**Nova**, appears only in this mode and is the default: a general assistant that
+answers broad questions from its own knowledge (options concepts, mechanics,
+how this system works) and uses the same tools for today's market, news and
+records. Same boundary as the crew: no trading powers exist for it. Ask things like
 *"What happened today?"*, *"Why didn't we trade?"*, *"Compare my QQQ and SPY
 backtests and tell me which one you'd trust less"*, *"Which position is closest
 to its premium stop?"*, and follow-ups — each agent keeps the last 10 turns in

@@ -80,7 +80,7 @@
   const promptBox = document.getElementById("chat-prompts");
   const clear = document.getElementById("chat-clear");
   const threads = new Map();
-  let active = "astra";
+  let active = data.default_agent || "astra";
 
   function persona() { return data.agents.find(a => a.id === active); }
   function history() {
@@ -320,6 +320,7 @@
     generation++;
     threads.clear();
     if (studio && studio.generative) request('/api/clear', {}).catch(() => {});
+    active = data.default_agent || active;
     selectAgent(active);
     input.value = "";
     input.focus();

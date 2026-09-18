@@ -359,7 +359,7 @@ class Studio:
                     try:
                         body = json.loads(self.rfile.read(size).decode("utf-8"), object_pairs_hook=_unique_object)
                         if (not isinstance(body, dict) or set(body) != {"agent", "text"}
-                                or body["agent"] not in [a[0] for a in AGENTS]
+                                or body["agent"] not in [a[0] for a in AGENTS] + (["nova"] if app.llm is not None else [])
                                 or not isinstance(body["text"], str) or not 1 <= len(body["text"].strip()) <= 800
                                 or len(body["text"]) > 800):
                             raise ValueError()
