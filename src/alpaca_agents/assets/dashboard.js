@@ -1,4 +1,5 @@
-/* Offline Layer 4 guide. No network, storage, command execution or broker access. */
+/* Layer 4 guide. Static mode is offline; served mode calls only its loopback origin.
+   No storage, shell commands, order endpoints or broker credentials. */
 (() => {
   "use strict";
 
@@ -52,6 +53,25 @@
   const context = document.getElementById("agent-context");
   if (!context) return;
   const data = JSON.parse(context.textContent);
+  const studio = data.studio;
+  if (studio && (location.origin !== studio.base_url || location.hostname !== '127.0.0.1')) return;
+  if (studio) {
+    window.__studio = studio;
+    data.schedule = studio.schedule;
+  }
+  let pending = false;
+  let generation = 0;
+  let connected = true;
+  async function request(route, body) {
+    const response = await fetch(studio.base_url + route, {
+      method: body ? 'POST' : 'GET', mode: 'same-origin', credentials: 'omit',
+      cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(120000),
+      headers: {'X-Studio-Token': studio.token, ...(body ? {'Content-Type': 'application/json'} : {})},
+      ...(body ? {body: JSON.stringify(body)} : {})
+    });
+    if (!response.ok) throw new Error('Local server unavailable');
+    return response.json();
+  }
   const selector = document.getElementById("chat-agent");
   const log = document.getElementById("chat-log");
   const input = document.getElementById("chat-input");
@@ -75,6 +95,15 @@
     const body = document.createElement("p");
     body.textContent = message.text;
     item.append(label, body);
+    // Chart payloads are isolated image documents, never DOM/SVG markup.
+    if (Array.isArray(message.charts)) message.charts.slice(0, 6).forEach(svg => {
+      if (typeof svg !== 'string' || svg.length > 200000) return;
+      const image = document.createElement('img');
+      image.alt = 'Chart from local runtime records';
+      image.style.maxWidth = '100%';
+      image.src = 'data:image/svg+xml;base64,' + btoa(Array.from(new TextEncoder().encode(svg), b => String.fromCharCode(b)).join(''));
+      item.append(image);
+    });
     if (message.source) {
       const source = document.createElement("small");
       source.className = "message-source";
@@ -113,27 +142,43 @@
       input.focus({preventScroll: true});
     }
   }
-  function ask(raw) {
+  async function ask(raw) {
     const original = String(raw).trim().slice(0, 800);
-    if (!original) return;
+    if (!original || pending) return;
     const question = redactSecrets(original);
-    const answer = question !== original
-      ? {text: "I hid a possible credential or long token. Don't paste secrets into chat; rotate a key if it was exposed. No message was transmitted or saved to disk.", source: "Local privacy guard"}
-      : answerFor(question, active, data);
-    const userMessage = {who: "user", text: question};
-    const response = {who: "agent", ...answer};
-    const messages = history();
-    messages.push(userMessage, response);
-    // Bound both memory and rendered history: latest 20 question/answer pairs.
-    if (messages.length > 41) {
-      messages.splice(1, messages.length - 41);
-      drawHistory();
+    const agent = active, epoch = generation, messages = history();
+    messages.push({who: 'user', text: question});
+    input.value = '';
+    drawHistory();
+    let answer;
+    if (question !== original) {
+      answer = {text: "I hid a possible credential or long token. Don't paste secrets into chat; rotate a key if it was exposed. No message was transmitted or saved to disk.", source: 'Local privacy guard'};
+    } else if (studio) {
+      pending = true;
+      form.setAttribute('aria-busy', 'true');
+      document.getElementById('chat-send').disabled = true;
+      try {
+        answer = await request('/api/ask', {agent, text: question});
+        if (typeof answer.text !== 'string' || typeof answer.source !== 'string') throw new Error('Invalid reply');
+        if ('last_cycle' in answer) data.last_cycle = answer.last_cycle;
+        if ('schedule' in answer) data.schedule = answer.schedule;
+        connected = true;
+      } catch {
+        connected = false;
+        answer = {text: 'Local server unavailable or request refused. Current state is unknown. No automatic retry was made; inspect local records before trying a diagnostic again.', source: 'Local connection status'};
+      } finally {
+        pending = false;
+        form.setAttribute('aria-busy', 'false');
+        document.getElementById('chat-send').disabled = false;
+        updateAge();
+      }
     } else {
-      drawMessage(userMessage);
-      drawMessage(response);
-      log.scrollTop = log.scrollHeight;
+      answer = answerFor(question, agent, data);
     }
-    input.value = "";
+    if (epoch !== generation) return; // Clear means clear, including replies in flight.
+    messages.push({who: 'agent', ...answer});
+    if (messages.length > 41) messages.splice(1, messages.length - 41);
+    if (active === agent) drawHistory();
   }
 
   form.addEventListener("submit", event => {event.preventDefault(); ask(input.value);});
@@ -163,6 +208,7 @@
     });
   });
   clear.addEventListener("click", () => {
+    generation++;
     threads.clear();
     selectAgent(active);
     input.value = "";
@@ -170,6 +216,14 @@
   });
 
   function updateAge() {
+    if (studio) {
+      const stamp = Date.parse(data.last_cycle);
+      const last = Number.isFinite(stamp) ? new Date(stamp).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC') : 'unknown';
+      document.getElementById('chat-snapshot').textContent = connected
+        ? `Live local records · last cycle ${last} · ${data.schedule || 'schedule unknown'} · not live quotes`
+        : 'Disconnected · current state unknown';
+      return;
+    }
     const stamp = Date.parse(data.rendered_at);
     const elapsed = Date.now() - stamp;
     const text = !Number.isFinite(stamp) || elapsed < 0 ? "Snapshot time unknown / check clock"
@@ -182,5 +236,15 @@
   clear.disabled = false;
   selectAgent(active);
   updateAge();
-  setInterval(updateAge, 30000);
+  setInterval(async () => {
+    if (studio && !pending) {
+      try {
+        const current = await request('/api/snapshot');
+        data.last_cycle = current.last_cycle;
+        data.schedule = current.schedule;
+        connected = true;
+      } catch { connected = false; }
+    }
+    updateAge();
+  }, 30000);
 })();

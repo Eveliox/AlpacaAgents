@@ -1,8 +1,8 @@
 # Handover: AlpacaAgent
 
 Paper-only automated options swing-trading system with four named roles and a
-read-only dashboard. Everything here is a working, tested state as of commit
-`33b43de` on `main`. Read this file, then `CLAUDE.md` (hard rules), then
+read-only dashboard. Milestone 1 of the local chat server is now implemented
+(see §9; earlier trading/backtest baseline: `33b43de`). Read this file, then `CLAUDE.md` (hard rules), then
 `README.md` (full reference) and `PLAYBOOK.md` (operator routine).
 
 Owner: individual trader, Windows 11, PowerShell, Python 3.13, Node 22.
@@ -10,7 +10,7 @@ Repo: https://github.com/Eveliox/AlpacaAgents
 
 ---
 
-## 1. What exists (all committed, 247 Python tests + 5 Node tests + browser smoke test)
+## 1. What exists (Python + Node tests, static and served browser smoke tests)
 
 | Layer | Module | Role name | Status |
 |---|---|---|---|
@@ -19,6 +19,7 @@ Repo: https://github.com/Eveliox/AlpacaAgents
 | 3 Executor | `executor/` | **Houston** | Only broker boundary. Paper URL hardcoded. Journal with reserve→claim→submit, single-use auth, stored bodies. Reconciliation with real checks. Exit manager. Manual `release-intent` / `flatten`. |
 | 4 Dashboard | `dashboard*.py`, `assets/` | **Astra** | Static HTML, charcoal/gold. Agent avatars (owner's artwork). Offline rule-based chat (NOT an LLM). CSP, no network, no forms. |
 | Orchestration | `controller.py` | — | One cycle or `--every N` loop. Runtime lock (one controller per dir). Never submits without `--submit`. |
+| Local chat server | `studio.py` | — | `controller --serve`, loopback-only, fresh local records per question, token/Origin/Host guards. Exact Houston `reconcile` requests a dry diagnostic. No order routes. |
 | Backtest | `backtest/` | — | Underlying-level walk-forward replay. **Audited** (see §4). Options P&L NOT modelled. |
 
 Support: `calendar.py` (NYSE sessions/holidays), `gateway.py` (control modes), `notify.py` (JSONL + optional webhook), `executor/eastern.py` (ET dates).
@@ -84,13 +85,15 @@ python -m alpaca_agents.scanner --session YYYY-MM-DD --symbols SPY QQQ IWM      
 python -m alpaca_agents.backtest --symbol QQQ --bars-file runtime\bars-QQQ.json --playbooks trend oversold_bounce breakout --output runtime\bt-QQQ.json
 python -m alpaca_agents.controller --runtime runtime [--every 300] [--dashboard] [--enable-playbook X] [--submit]
 python -m alpaca_agents.dashboard        # or double-click Open-Dashboard.cmd
+python -m alpaca_agents.controller --serve # local records; no keys needed until a diagnostic cycle
 ```
 
 Tests:
 ```sh
-python -m unittest discover -s tests            # 247
-node --test tests/test_dashboard_chat.cjs       # 5
+python -m unittest discover -s tests
+node --test tests/test_dashboard_chat.cjs       # includes Python/browser router parity
 python -m alpaca_agents.dashboard && node tests/dashboard_browser.cjs   # Chrome headless smoke test
+node tests/dashboard_browser.cjs --served      # isolated synthetic runtime, real HTTP, no keys
 ```
 CI: `.github/workflows/tests.yml` runs Python 3.11–3.13 + Node tests.
 
@@ -101,7 +104,7 @@ CI: `.github/workflows/tests.yml` runs Python 3.11–3.13 + Node tests.
 - `rules.py` stays pure and deterministic. No LLM anywhere in the decision path.
 - Fail-closed: missing/unknown → rejected/DISABLED. Unknown submission outcome → stays `claimed` for reconciliation, never retried.
 - One attempt per order, ever.
-- The dashboard is read-only. The chat is Layer 4; it cannot place, cancel, approve, arm, or change limits. CSP: `connect-src 'none'`, `form-action 'none'`, only the bundled script hash.
+- The dashboard is read-only for trading. Chat is Layer 4; it cannot place, cancel, approve, arm, or change limits. Served Houston's exact `reconcile` request invokes a dry diagnostic through the controller, never submits or reserves entries. Static CSP: `connect-src 'none'`; served CSP: `'self'`; both block forms and allow only the bundled script hash.
 - Dashboard shows **Unknown**, never 0, when a journal is missing/unreadable.
 - Backtest reports say `options_pnl_modelled: false`; never present R as dollars.
 - Tests are the spec. Add tests for behaviour changes; the full-lifecycle controller test (`tests/test_controller.py`) runs against a stateful fake broker and has caught 4 real bugs.
@@ -116,15 +119,29 @@ CI: `.github/workflows/tests.yml` runs Python 3.11–3.13 + Node tests.
 - Options-level backtest does not exist (needs point-in-time option quotes).
 - Chat is rule-based; no generative model connected.
 
-## 9. Next work — the agreed blueprint (owner asked for this; not started)
+## 9. Chat blueprint — milestone 1 complete; stop for review
 
-**Executable spec with acceptance criteria and a kickoff prompt: `docs/TASK-chat-server.md`.**
+**Executable spec with acceptance criteria and implementation clarifications: `docs/TASK-chat-server.md`.**
+
+- [x] Milestone 1: localhost server + fresh-runtime chat. Implementation commit
+  is recorded in `git log` (message: “Serve fresh local chat without adding an order path”).
+- [ ] Milestones 2–4: charts, Houston outlook, manual dry-run drafts.
+- [ ] Milestone 5: separately authorized human-confirmed paper submission.
+- [ ] Milestone 6: optional LLM. No generative model connected.
+
+Start: `python -m alpaca_agents.controller --serve`; open its printed URL.
+No background cycles without `--every`; no browser auto-open. The per-launch
+session token is local-only, never saved by the app. Keep the terminal open.
+`reconcile` needs rotated paper keys in that process's environment; ordinary
+questions just read current local reports. Inspect timestamps, not a “live”
+badge, for freshness. The worker serializes reads and cycles and holds the
+runtime lock until shutdown finishes. Approval/control files are untouched.
 
 Goal: ask Star "give me a rundown of today with charts" and ask Houston "what
 are you looking for / place this trade" **from the chat**.
 
-Prerequisite for both: a local backend. Today's dashboard is a static file.
-Add `controller --serve`: HTTP server on `127.0.0.1`, random port, per-launch
+Prerequisite for both: a local backend (now built; static file mode remains).
+`controller --serve`: HTTP server on `127.0.0.1`, random port, per-launch
 secret token, **run inside the controller process** so one process owns the
 broker client, runtime lock and journal. Nothing off-machine, no keys in browser.
 

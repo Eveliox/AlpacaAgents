@@ -11,7 +11,7 @@ Fail-closed at every stage:
 - no enabled playbooks -> ideas are still recorded as shadow, never reserved
 - any exception in a provider -> that stage is skipped with an incident note
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
@@ -366,9 +366,12 @@ def main() -> int:
     parser.add_argument("--every", type=int, metavar="SECONDS",
                         help="loop: run a cycle every N seconds (>=60) until the market closes or an incident halts it")
     parser.add_argument("--dashboard", action="store_true", help="re-render runtime/dashboard.html after each cycle")
+    parser.add_argument("--serve", action="store_true", help="serve the local workspace on 127.0.0.1; chat cannot submit orders")
     args = parser.parse_args()
     if args.every is not None and args.every < 60:
         parser.error("--every must be at least 60 seconds")
+    if args.serve and args.submit and args.every is None:
+        parser.error("--serve --submit requires --every; on-demand chat cycles are always dry")
     rt = args.runtime
     try:
         with RuntimeLock(rt):
@@ -381,6 +384,29 @@ def main() -> int:
 
 
 def _run(args, rt: Path) -> int:
+    import sys
+    if args.serve:
+        from .studio import serve
+        one = None
+
+        def queued_cycle(*, dry_run):
+            nonlocal one
+            # Initialized on the SAME worker that later runs all cycles/reads.
+            # Opening the workspace alone needs no credentials or broker call.
+            if one is None:
+                one = _make_cycle(args, rt)
+            return one(datetime.now(timezone.utc), dry_run=dry_run)
+
+        return serve(rt, cycle=queued_cycle, every=args.every)
+    one = _make_cycle(args, rt)
+    if args.every is None:
+        report = one(datetime.now(timezone.utc))
+        print(json.dumps(report, indent=2, default=str))
+        return 0 if report["stages"].get("reconcile", {}).get("ok") else 2
+    return loop(one, every=args.every, log=lambda m: print(m, file=sys.stderr))
+
+
+def _make_cycle(args, rt: Path):
     import sys
     from .executor.client import Credentials, PaperClient, TraceStore
     from .executor.fills import FillLedger
@@ -395,30 +421,36 @@ def _run(args, rt: Path) -> int:
     enabled, refused = approved_playbooks(args.enable_playbook, rt / "playbooks")
     for item in refused:
         print(f"playbook refused: {item['playbook']}: {item['reason']}", file=sys.stderr)
-    now = datetime.now(timezone.utc)
     from .executor.eastern import eastern_date
-    session = args.session or previous_weekday(eastern_date(now))
-    ideas_provider, closes_provider, bars_provider, bids_provider, bind = _live_providers(session, rt / "market-data.jsonl", args.symbols)
-    bind(enabled)
     ledger, store = FillLedger(rt / "fills.sqlite3"), ActivityStore(rt / "activities.sqlite3")
     config = CycleConfig(submit=args.submit, enabled_playbooks=enabled, reconcile=config_from_runtime(rt))
     if config.reconcile.margin_paper_acknowledged:
         print("paper margin account acknowledged: cash semantics enforced locally", file=sys.stderr)
 
-    def one(now):
+    def one(now, *, dry_run=False):
+        providers = None
+
+        def provider(index, *a, **kw):
+            nonlocal providers
+            if providers is None:
+                session = args.session or previous_weekday(eastern_date(now))
+                providers = _live_providers(session, rt / "market-data.jsonl", args.symbols)
+                providers[4](enabled)
+            return providers[index](*a, **kw)
+
+        # A chat diagnostic cannot reserve/claim entries or prepare exits, even
+        # if the separately scheduled controller was launched with --submit.
+        effective = replace(config, submit=False, enabled_playbooks=frozenset()) if dry_run else config
         report = run_cycle(client=client, ledger=ledger, store=store, journal=journal, notifier=notifier,
-                           ideas_provider=ideas_provider, closes_provider=closes_provider, bars_provider=bars_provider,
-                           bids_provider=bids_provider, now=now, config=config, report_path=rt / "cycles.jsonl")
-        if args.dashboard:
+                           ideas_provider=lambda **kw: provider(0, **kw), closes_provider=lambda s: provider(1, s),
+                           bars_provider=lambda s: provider(2, s), bids_provider=lambda s: provider(3, s),
+                           now=now, config=effective, report_path=rt / "cycles.jsonl")
+        if args.dashboard or args.serve:
             from .dashboard import build
             build(rt, rt / "dashboard.html", now=datetime.now(timezone.utc))
         return report
 
-    if args.every is None:
-        report = one(now)
-        print(json.dumps(report, indent=2, default=str))
-        return 0 if report["stages"].get("reconcile", {}).get("ok") else 2
-    return loop(one, every=args.every, log=lambda m: print(m, file=sys.stderr))
+    return one
 
 
 if __name__ == "__main__":

@@ -120,7 +120,9 @@ class ChatTests(unittest.TestCase):
             self.assertIn(expected, page.policy)
         self.assertEqual(page.external, [])
         self.assertEqual(page.events, [])
-        for unsafe in ("fetch(", "XMLHttpRequest", "WebSocket", "localStorage", "sessionStorage", "innerHTML", "eval("):
+        # Served mode uses fetch, but static rendering never supplies its bootstrap.
+        self.assertNotIn('"studio":', render(self.data()))
+        for unsafe in ("XMLHttpRequest", "WebSocket", "localStorage", "sessionStorage", "innerHTML", "eval("):
             self.assertNotIn(unsafe, js)
 
 

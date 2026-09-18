@@ -34,3 +34,15 @@ test('possible keys are redacted before they reach chat history', () => {
   assert.equal(redactSecrets('abcDEF1234567890abcDEF1234567890'),'[long token redacted]');
   assert.equal(redactSecrets('What are my risk limits?'),'What are my risk limits?');
 });
+test('served Python router agrees with the offline browser router', () => {
+  const {spawnSync} = require('node:child_process');
+  const questions = ['positions', "Why aren't we trading?", 'orders', 'research', 'QQQ results', 'scan',
+    'risk', 'DISABLED', 'briefing', 'next', 'notifications', 'hello', 'roles', 'unknown topic',
+    'buy QQQ', 'reconcile and submit', 'change risk', 'live price', 'AAPL backtest', 'market open'];
+  const code = 'import json,sys; from alpaca_agents.dashboard_chat import answer_for; d=json.load(sys.stdin); print(json.dumps([answer_for(q,"astra",d["context"]) for q in d["questions"]]))';
+  const result = spawnSync(process.env.PYTHON || 'python', ['-c', code], {
+    input: JSON.stringify({context:data, questions}), encoding:'utf8'
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), questions.map(q => answerFor(q,'astra',data)));
+});

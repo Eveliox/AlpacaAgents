@@ -11,6 +11,36 @@ the owner's explicit go-ahead in writing after they've used 4 for a week.
 
 ---
 
+## Milestone 1 implementation clarifications
+
+Milestone 1 is implemented; milestones 2–6 remain unimplemented.
+
+- `/` is the guarded bootstrap route, not a token-authenticated API (the browser
+  cannot have the token before loading it). Exact Host, optional matching
+  Origin, cross-site-fetch rejection, frame denial and no-store apply there.
+  Every `/api/*` route requires the token; POST also requires a matching Origin.
+- `/api/snapshot` returns an **allowlisted display projection** plus curated
+  conversation context, not raw `collect()` output. Raw live intents contain
+  account IDs, order bodies and audit payloads that must stay server-side.
+- Startup is lazy: no keys or broker calls just to view local records. The
+  controller initializes its broker boundary on the serialized worker only
+  when a cycle is explicitly requested or scheduled.
+- Exact Houston `reconcile` runs a diagnostic with `submit=False` and no enabled
+  entry playbooks, regardless of scheduled-cycle permissions. It can import
+  fills/resolve terminal intents but cannot reserve entries or prepare exits.
+- The same worker queue runs scheduled cycles and reads. Incident/market-close
+  halts stop scheduling while leaving the read-only UI available for inspection.
+  `--serve --submit` without `--every` is rejected.
+- Market-data providers initialize lazily per cycle (not per server lifetime),
+  so disabled reconciliation needs no data key and an old quote cache is not
+  reused across cycles. Unknown/error state is not shown as live readiness.
+- Later milestone sketches require another code/schema review before building:
+  ATR filtering currently belongs to scanner signals, not Moon's `evaluate`;
+  manual ideas must **not** bypass existing approval/enablement gates; entry
+  permission must not be granted under `EXITS_ONLY`; chat submission must also
+  retain `--submit`. The journal authorization ID is not a substitute for a
+  separate human-confirmation capability. None of these later routes exists.
+
 ## Architecture (all milestones)
 
 ```

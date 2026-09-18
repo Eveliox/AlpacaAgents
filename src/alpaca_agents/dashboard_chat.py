@@ -9,6 +9,7 @@ import hashlib
 import html
 from importlib.resources import files
 import json
+import re
 from decimal import Decimal, InvalidOperation
 
 ART = {
@@ -53,7 +54,39 @@ def _reply(text, source):
     return {"text": text, "source": source}
 
 
-def conversation_data(d, agents):
+def redact_secrets(text):
+    text = re.sub(r'\b(?:api[_ -]?key|api[_ -]?secret|secret|token|account[_ -]?id|request[_ -]?id|trace[_ -]?id|broker_order_id|client_order_id)\s*[:=]\s*[\"\']?[^\s\"\',;&]+',
+                  '[credential redacted]', str(text), flags=re.I)
+    return re.sub(r'\b[A-Za-z0-9_-]{24,}\b', '[long token redacted]', text)
+
+
+def answer_for(question, agent_id, data):
+    """Server-side equivalent of dashboard.js's offline topic router; no actions."""
+    q = question.lower().strip()
+    agent = next((a for a in data['agents'] if a['id'] == agent_id), data['agents'][0])
+    if re.search(r'\b(buy|sell|submit|execute|enable|disable|arm|flatten|cancel)\b|place.*order|change.*(limit|risk|control)|trade for me|guarantee.*(profit|return)|live price|price.*(now|today|tomorrow)|what.*(buy|trade)|best trade', q):
+        return data['topics']['safety']
+    if re.search(r'backtest|research|expectancy|\bresults?\b|\bedge\b|profitab|trust|\bmean r\b|\bwin rate\b', q):
+        symbol = next((s for s in data['research'] if s.lower() in re.split(r'[^a-z0-9]+', q)), None)
+        return data['research'][symbol] if symbol else data['topics']['research']
+    if re.search(r'who are you|what do you do|your role|\bhello\b|\bhi\b', q):
+        return _reply(agent['intro'], 'Display persona · local snapshot guide, not a live trader')
+    for pattern, topic in (
+        (r'risk|breaker|loss limit|stop loss|\$40|\$100|position limit|cash limit', 'risk'),
+        (r'disabled|exits.only|armed.paper|control mode', 'controls'),
+        (r'scan|data access|403|subscription|massive|polygon|stock.*advanced|options.*data|\bideas?\b', 'scan'),
+        (r'block|why.*trad|not.*trad|aren.t.*trad|reconcil|market open|market closed', 'blockers'),
+        (r'position|holding|inventory|unrealized', 'positions'),
+        (r'order|intent|fill|last trade', 'orders'), (r'notif|alert|message', 'notifications'),
+        (r'next|routine|recommend|improv|more effect|how.*use', 'next'),
+        (r'roles|team|crew|who.*agents', 'roles'), (r'status|brief|summary|overview|cash|balance|p&l|pnl', 'briefing'),
+    ):
+        if re.search(pattern, q):
+            return data['topics'][topic]
+    return data['topics']['help']
+
+
+def conversation_data(d, agents, *, live=False):
     """Precompute auditable answers; JS only selects a topic, never invents facts."""
     last = d["cycles"][0] if d["cycles"] else {}
     rec = _obj(_obj(last.get("stages")).get("reconcile"))
@@ -164,7 +197,18 @@ def conversation_data(d, agents):
         "help": _reply("I'm a local, rule-based snapshot guide, not generative AI. I can explain your saved positions, orders, scans, research, risk limits, controls and notifications. "
                        "Try the suggested questions. I don't have live prices, and chat is cleared on refresh. Never paste API keys here.", "Local guide capabilities"),
     }
-    return {"rendered_at": d["now"].isoformat(), "topics": topics, "research": by_symbol,
+    if live:
+        topics['briefing']['text'] = briefing.replace(
+            'I cannot see whether a controller is running or whether the market is open right now. Rebuild the dashboard after new cycles to update my sources.',
+            'These local records were read for this request, not fetched from the broker. A recent saved check is not proof of current readiness. Ask Houston exactly "reconcile" for a dry diagnostic cycle.')
+        topics['controls']['source'] = 'trading-control · read for this request'
+        topics['next']['text'] = next_steps.replace('Rebuild this dashboard to update the snapshot.', 'Ask again to read updated local records; refresh the page for updated panels.')
+        topics['help']['text'] = ('I am a local rule-based guide, not generative AI. I read current runtime records for each question, '
+                                  'not live quotes. Ask Houston exactly "reconcile" for a dry diagnostic cycle. No orders, controls or approvals from chat. Never paste keys.')
+        topics['safety']['text'] = ("I can't place, approve, cancel or change trades, controls, limits or keys. Chat has no order route. "
+                                    'Only Houston\'s exact "reconcile" command requests a dry controller check; it cannot submit orders.')
+    return {"rendered_at": d["now"].isoformat(), "live": live,
+            "last_cycle": last.get('finished_at'), "topics": topics, "research": by_symbol,
             "agents": [{"id": key, "name": name, "role": role, "avatar": avatar_uri(key),
                         "intro": f"I'm {name}'s dashboard guide. My specialty: {role.lower()}. Ask me to explain the saved records; I cannot operate the trading system.",
                         "prompts": PROMPTS[key]} for key, name, role, description in agents]}
@@ -175,11 +219,19 @@ def safe_json(data):
     return json.dumps(data, ensure_ascii=True, allow_nan=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
 
 
-def render_chat(d, agents):
-    data = conversation_data(d, agents)
+def script_policy(*, live=False):
     javascript = files("alpaca_agents").joinpath("assets", "dashboard.js").read_text(encoding="utf-8")
     digest = base64.b64encode(hashlib.sha256(javascript.encode("utf-8")).digest()).decode("ascii")
-    csp = f"default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'sha256-{digest}'; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'"
+    connect = "'self'" if live else "'none'"
+    return f"default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'sha256-{digest}'; connect-src {connect}; form-action 'none'; base-uri 'none'; object-src 'none'"
+
+
+def render_chat(d, agents, *, studio=None):
+    data = conversation_data(d, agents, live=studio is not None)
+    if studio is not None:
+        data['studio'] = studio  # In-memory HTTP bootstrap only; never written by build().
+    javascript = files("alpaca_agents").joinpath("assets", "dashboard.js").read_text(encoding="utf-8")
+    csp = script_policy(live=studio is not None)
     options = "".join(f'<option value="{key}"{" selected" if key == "astra" else ""}>{name} · {html.escape(role)}</option>' for key, name, role, _ in agents)
     markup = f'''<aside class="chat-dock" id="agent-chat" aria-labelledby="chat-title">
 <div class="chat-heading"><span class="eyebrow">Your crew, one conversation away</span><h2 id="chat-title">Talk to your agents</h2><p>Local snapshot guide · not generative AI</p></div>
@@ -192,5 +244,8 @@ def render_chat(d, agents):
 <div class="chat-bottom"><span>Read-only · no network · no orders</span><button id="chat-clear" type="button" disabled>Clear chat</button></div>
 <p class="chat-privacy">Don’t paste keys. Messages stay in memory and clear on refresh. Replies use only the saved snapshot and supported topics.</p>
 <noscript><p class="notice">Local chat needs JavaScript. No remote service or API key is required.</p></noscript></aside>'''
+    if studio is not None:
+        markup = markup.replace('Read-only · no network · no orders', 'Local server · no chat orders')
+        markup = markup.replace('Replies use only the saved snapshot and supported topics.', 'Replies read current local records. Houston: type reconcile for a dry diagnostic cycle.')
     scripts = f'<script id="agent-context" type="application/json">{safe_json(data)}</script><script>{javascript}</script>'
     return markup, scripts, csp

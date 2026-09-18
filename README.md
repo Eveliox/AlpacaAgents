@@ -457,6 +457,43 @@ snapshot: regenerate it for updated data, then refresh the browser.
 
 ### Talk to your crew
 
+#### Live local records (milestone 1)
+
+```powershell
+python -m alpaca_agents.controller --runtime runtime --serve
+```
+
+Open the `http://127.0.0.1:<port>/` URL printed in the terminal. Keep that
+terminal open; Ctrl+C shuts down the server and releases the controller lock.
+No keys are needed to open the workspace or ask about recorded data. **This
+does not arm trading, approve playbooks, start cycles, or submit orders.**
+
+- Chat rereads local journals/reports on each question. Refresh the page for
+  updated dashboard panels. “Live local records” does **not** mean live quotes
+  or a fresh broker check; the last-cycle timestamp can still be old/unknown.
+- Ask Houston exactly **reconcile** to request one dry diagnostic controller
+  cycle. Load rotated paper keys in the launching shell first for that check.
+  Missing credentials produce an explicit unavailable/unknown answer. No chat
+  diagnostic can submit orders, reserve entries or prepare exits. Diagnostics
+  may import activities, resolve terminal intents and write cycle reports.
+- `--every 300` adds scheduled controller cycles using the existing gates and
+  halt conditions. A closed market or incident stops the schedule, not the web
+  server; it never restarts itself. `--submit` is still an explicit CLI option
+  for **scheduled cycles only**, and requires `--every` in served mode.
+- One runtime lock and one bounded worker serialize all cycles and reads.
+  There is no second broker client in the web server. No order/confirm routes
+  exist. This is still rule-based chat; charts and trade drafts come later.
+- Loopback binding only; per-launch session token; exact Host/Origin checks;
+  no CORS, no caching, no framing. The initial same-origin page bootstraps the
+  token; all APIs require it. Do not share the printed token or served HTML.
+  Broker/data keys never belong in the browser. The snapshot API is an
+  allowlisted display projection, **not** a raw journal dump.
+- Chat messages are not logged or persisted. Requests have size/rate limits.
+  Connection failures show Unknown; no silent offline fallback or automatic
+  diagnostic retry. Other local processes are outside this security boundary.
+
+#### Offline snapshot (existing launcher)
+
 Click **Talk to Houston / Star / Moon / Astra** on a character card, or use the
 agent dropdown in the chat panel. On a phone, **Talk to the crew** at the top
 jumps directly to chat. Filters also switch the conversation persona.
@@ -527,6 +564,8 @@ node --test tests/test_dashboard_chat.cjs
 # Optional: Node 22 and Chrome/Chromium; set CHROME_PATH if needed.
 python -m alpaca_agents.dashboard
 node tests/dashboard_browser.cjs
+# Real HTTP + browser path, isolated synthetic runtime; no credentials:
+node tests/dashboard_browser.cjs --served
 ```
 
 The browser smoke test uses an isolated temporary profile and checks avatars,
