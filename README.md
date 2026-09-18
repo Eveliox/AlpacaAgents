@@ -492,6 +492,44 @@ does not arm trading, approve playbooks, start cycles, or submit orders.**
   Connection failures show Unknown; no silent offline fallback or automatic
   diagnostic retry. Other local processes are outside this security boundary.
 
+#### Generative agents (optional, milestone 6)
+
+Set an Anthropic key in the shell that launches `--serve` and the four agents
+answer in natural language with their own personalities:
+
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-..."      # keep it in keys.ps1, never in the repo
+python -m alpaca_agents.controller --runtime runtime --serve
+```
+
+The terminal prints `Generative chat: ON (model, daily cap)`. Ask things like
+*"What happened today?"*, *"Why didn't we trade?"*, *"Compare my QQQ and SPY
+backtests and tell me which one you'd trust less"*, *"Which position is closest
+to its premium stop?"*, and follow-ups — each agent keeps the last 10 turns in
+process memory.
+
+What the model can do is decided by code, not by the prompt. It has exactly
+four **read-only tools**: `read_snapshot` (the same sanitized projection the
+page shows), `read_backtest(symbol)`, `read_cycles(limit)`, `explain_rule(topic)`.
+There is no tool for orders, journal, controls, approvals, keys, shell or file
+writes; an attempt to call one returns an error to the model. Tool results and
+replies pass through the credential redactor; anything that looks like a key in
+*your* message is blocked before it leaves the machine. Houston's exact
+`reconcile` command stays deterministic and never goes to the model.
+
+- **Data leaves the machine.** Your questions plus sanitized local records go to
+  Anthropic's API (host pinned, stdlib HTTPS, no SDK). Nothing else does.
+- **Cost bound.** `ALPACA_AGENTS_LLM_DAILY_CAP` (default 100 calls/day, tool
+  rounds count) and 1024 output tokens per reply. Past the cap, and on any
+  provider error, the rule-based answer is returned with a source note saying so.
+- **Model.** `ALPACA_AGENTS_LLM_MODEL` (default `claude-sonnet-4-5`).
+- **Clear chat** also erases the server-side memory (`POST /api/clear`).
+- Replies are text about *saved records*; the model is told to say "I don't have
+  that record" rather than guess, and gives no trade recommendations. Verify
+  anything that matters against the panels and the broker UI.
+- Tests use a scripted fake transport; CI never calls the API. Hostile-prompt
+  tests assert no tool other than the four exists and no runtime file changes.
+
 #### Offline snapshot (existing launcher)
 
 Click **Talk to Houston / Star / Moon / Astra** on a character card, or use the

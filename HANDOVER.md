@@ -19,6 +19,7 @@ Repo: https://github.com/Eveliox/AlpacaAgents
 | 3 Executor | `executor/` | **Houston** | Only broker boundary. Paper URL hardcoded. Journal with reserve→claim→submit, single-use auth, stored bodies. Reconciliation with real checks. Exit manager. Manual `release-intent` / `flatten`. |
 | 4 Dashboard | `dashboard*.py`, `assets/` | **Astra** | Static HTML, charcoal/gold. Agent avatars (owner's artwork). Offline rule-based chat (NOT an LLM). CSP, no network, no forms. |
 | Orchestration | `controller.py` | — | One cycle or `--every N` loop. Runtime lock (one controller per dir). Never submits without `--submit`. |
+| Generative agents | `llm_chat.py` | all four | Optional. Anthropic Messages API via stdlib HTTPS. Tools: read_snapshot/read_backtest/read_cycles/explain_rule only. Falls back to the rule router. Off without `ANTHROPIC_API_KEY`. |
 | Local chat server | `studio.py` | — | `controller --serve`, loopback-only, fresh local records per question, token/Origin/Host guards. Exact Houston `reconcile` requests a dry diagnostic. No order routes. |
 | Backtest | `backtest/` | — | Underlying-level walk-forward replay. **Audited** (see §4). Options P&L NOT modelled. |
 
@@ -117,7 +118,7 @@ CI: `.github/workflows/tests.yml` runs Python 3.11–3.13 + Node tests.
 - Entry can happen after an overnight gap through the stop/target (replay now calls this `no_trade`; live has no intraday underlying check).
 - Bounce playbook stop design needs rework before it's worth retesting.
 - Options-level backtest does not exist (needs point-in-time option quotes).
-- Chat is rule-based; no generative model connected.
+- Generative chat is optional and read-only; it narrates saved records and cannot see live quotes. Milestones 2–5 (charts, outlook, manual drafts, confirm) are not built.
 
 ## 9. Chat blueprint — milestone 1 complete; stop for review
 
@@ -127,7 +128,10 @@ CI: `.github/workflows/tests.yml` runs Python 3.11–3.13 + Node tests.
   is recorded in `git log` (message: “Serve fresh local chat without adding an order path”).
 - [ ] Milestones 2–4: charts, Houston outlook, manual dry-run drafts.
 - [ ] Milestone 5: separately authorized human-confirmed paper submission.
-- [ ] Milestone 6: optional LLM. No generative model connected.
+- [x] Milestone 6: optional generative agents (`llm_chat.py`). Enabled only by
+  `ANTHROPIC_API_KEY` in the `--serve` process; four read-only tools enforced in
+  code; deterministic fallback; daily cap; fake transport in tests. Built before
+  2–5 at the owner's request; charts/outlook/drafts still pending.
 
 Start: `python -m alpaca_agents.controller --serve`; open its printed URL.
 No background cycles without `--every`; no browser auto-open. The per-launch

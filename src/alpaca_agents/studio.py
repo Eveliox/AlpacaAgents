@@ -124,8 +124,8 @@ class _LoopbackServer(ThreadingHTTPServer):
 
 
 class Studio:
-    def __init__(self, runtime: Path, *, cycle=None, every=None, clock=None):
-        self.runtime, self.cycle, self.every = runtime, cycle, every
+    def __init__(self, runtime: Path, *, cycle=None, every=None, clock=None, llm=None):
+        self.runtime, self.cycle, self.every, self.llm = runtime, cycle, every, llm
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.token = secrets.token_urlsafe(32)
         self.jobs = Queue(maxsize=16)
@@ -210,8 +210,15 @@ class Studio:
         return context
 
     def metadata(self, d):
-        return {"live": True, "read_at": d["now"].isoformat(), "schedule": self.schedule,
-                "last_cycle": d["cycles"][0].get("finished_at") if d["cycles"] else None}
+        meta = {"live": True, "read_at": d["now"].isoformat(), "schedule": self.schedule,
+                "last_cycle": d["cycles"][0].get("finished_at") if d["cycles"] else None,
+                "generative": self.llm is not None}
+        if self.llm is not None:
+            meta["llm_usage"] = self.llm.usage_today()
+        return meta
+
+    def bootstrap(self):
+        return {"token": self.token, "base_url": self.url, "schedule": self.schedule, "generative": self.llm is not None}
 
     def ask(self, agent, text):
         if redact_secrets(text) != text:
@@ -230,7 +237,13 @@ class Studio:
             reply["text"] = "Dry diagnostic cycle completed; no order submission requested.\n" + reply["text"]
         else:
             d = self.snapshot()
-            reply = dict(answer_for(text, agent, self.context(d)))
+            context = self.context(d)
+            if self.llm is not None:
+                from .llm_chat import ReadOnlyTools
+                reply = self.llm.ask(agent, text, tools=ReadOnlyTools(self.runtime, lambda: d), snapshot=d,
+                                     fallback=lambda: answer_for(text, agent, context))
+            else:
+                reply = dict(answer_for(text, agent, context))
         return {**reply, **self.metadata(d)}
 
     def _allowed_rate(self):
@@ -303,10 +316,10 @@ class Studio:
                     return
                 # Root is the same-origin bootstrap, not an unauthenticated API.
                 if self.command == "GET" and self.path == "/":
-                    page = app.call(lambda: render(app.snapshot(), studio={"token": app.token, "base_url": app.url, "schedule": app.schedule}))
+                    page = app.call(lambda: render(app.snapshot(), studio=app.bootstrap()))
                     self.respond(200, page.encode("utf-8"), "text/html; charset=utf-8")
                     return
-                if self.path not in ("/api/snapshot", "/api/ask"):
+                if self.path not in ("/api/snapshot", "/api/ask", "/api/clear"):
                     self.respond(404)
                     return
                 tokens = self.headers.get_all("X-Studio-Token", [])
@@ -321,6 +334,13 @@ class Studio:
                             visible.update(daily_loss=None, daily_net=None, latched=None)
                         return {"snapshot": visible, "context": app.context(d), **app.metadata(d)}
                     result = app.call(current)
+                elif self.path == "/api/clear" and self.command == "POST":
+                    if self.headers.get_all("Origin") != [app.url]:
+                        self.respond(403)
+                        return
+                    if app.llm is not None:
+                        app.call(app.llm.clear)
+                    result = {"cleared": True}
                 elif self.path == "/api/ask" and self.command == "POST":
                     if self.headers.get_all("Origin") != [app.url]:
                         self.respond(403)
@@ -362,8 +382,14 @@ class Studio:
 def serve(runtime, *, cycle, every=None):
     """Called while the controller owns RuntimeLock. Ctrl+C joins the worker."""
     import sys
-    app = Studio(runtime, cycle=cycle, every=every).start()
+    from .llm_chat import LLMChat
+    llm = LLMChat.from_environment()
+    app = Studio(runtime, cycle=cycle, every=every, llm=llm).start()
     print(f"Paper workspace: {app.url}/", file=sys.stderr, flush=True)
+    if llm is not None:
+        print(f"Generative chat: ON ({llm.model}, daily cap {llm.daily_cap}). Questions and sanitized local records go to Anthropic. No order tools.", file=sys.stderr, flush=True)
+    else:
+        print("Generative chat: off (set ANTHROPIC_API_KEY to enable). Rule-based replies only.", file=sys.stderr, flush=True)
     print(f"Local session token (do not share): {app.token}", file=sys.stderr, flush=True)
     try:
         while True:

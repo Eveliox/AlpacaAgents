@@ -210,6 +210,7 @@
   clear.addEventListener("click", () => {
     generation++;
     threads.clear();
+    if (studio && studio.generative) request('/api/clear', {}).catch(() => {});
     selectAgent(active);
     input.value = "";
     input.focus();

@@ -247,5 +247,10 @@ def render_chat(d, agents, *, studio=None):
     if studio is not None:
         markup = markup.replace('Read-only · no network · no orders', 'Local server · no chat orders')
         markup = markup.replace('Replies use only the saved snapshot and supported topics.', 'Replies read current local records. Houston: type reconcile for a dry diagnostic cycle.')
+        if studio.get('generative'):
+            markup = markup.replace('Local snapshot guide · not generative AI', 'Generative replies (Anthropic API) · local records only · no orders')
+            markup = markup.replace('<span class="local-badge">LOCAL</span>', '<span class="local-badge">LOCAL + API</span>')
+            markup = markup.replace('Don’t paste keys. Messages stay in memory and clear on refresh.',
+                                    'Don’t paste keys. Your questions and sanitized local records are sent to Anthropic’s API. Memory is per agent, in this process only; Clear chat erases it.')
     scripts = f'<script id="agent-context" type="application/json">{safe_json(data)}</script><script>{javascript}</script>'
     return markup, scripts, csp

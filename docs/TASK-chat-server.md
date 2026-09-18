@@ -13,7 +13,7 @@ the owner's explicit go-ahead in writing after they've used 4 for a week.
 
 ## Milestone 1 implementation clarifications
 
-Milestone 1 is implemented; milestones 2–6 remain unimplemented.
+Milestones 1 and 6 are implemented (6 was pulled forward at the owner's request); milestones 2–5 remain unimplemented. M6 uses stdlib HTTPS to the Anthropic Messages API, not an SDK, and its tool allowlist is `llm_chat.TOOLS`; no route or tool for orders/confirm exists.
 
 - `/` is the guarded bootstrap route, not a token-authenticated API (the browser
   cannot have the token before loading it). Exact Host, optional matching
