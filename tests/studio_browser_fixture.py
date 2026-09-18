@@ -15,7 +15,17 @@ def main():
         'summary': {'trend': {'resolved': 37, 'expectancy_r': 0.25, 'median_r': 0.19,
                               'profit_factor': 1.53, 'max_loss_r': -1.8, 'no_trade': 1}}
     }), encoding='utf-8')
-    app = Studio(rt)
+    llm = None
+    if '--generative' in sys.argv:
+        from alpaca_agents.llm_chat import LLMChat
+        from tests.test_llm_chat import FakeTransport, text_reply
+        # One rich reply, then deterministic fallbacks. No provider or data calls.
+        llm = LLMChat(FakeTransport(text_reply(
+            '## Recorded risk\n**$100** maximum entry risk.\n'
+            '- Defined-risk options only.\n- Paper account only.\n'
+            'https://example.com/source\n<img src=x onerror=globalThis.injected=true>'
+        )), model='browser-fixture', daily_cap=100)
+    app = Studio(rt, llm=llm)
     original = app.ask
 
     def ask(agent, text):

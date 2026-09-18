@@ -259,15 +259,15 @@ def render_chat(d, agents, *, studio=None):
     chat_agents = list(agents) + ([NOVA] if generative else [])
     options = "".join(f'<option value="{key}"{" selected" if key == default else ""}>{name} · {html.escape(role)}</option>' for key, name, role, _ in chat_agents)
     persona_key, persona_name, persona_role, _ = next(a for a in chat_agents if a[0] == default)
-    nova_button = ('<button class="nova-button" type="button" data-chat-agent="nova" disabled>✦ Ask Nova anything</button>' if generative else "")
+    nova_button = ('<button class="nova-button" type="button" data-chat-agent="nova" disabled>Ask Nova anything ↗</button>' if generative else "")
     markup = f'''<aside class="chat-dock" id="agent-chat" aria-labelledby="chat-title">
-<div class="chat-heading"><span class="eyebrow">Your crew, one conversation away</span><h2 id="chat-title">Talk to your agents</h2><p>Local snapshot guide · not generative AI</p></div>
+<div class="chat-heading"><span class="eyebrow">Workspace assistant</span><h2 id="chat-title">Chat</h2><p>Local snapshot guide · not generative AI</p></div>
 <label class="chat-label" for="chat-agent">Choose your agent</label><select id="chat-agent">{options}</select>
 <div class="chat-persona"><img id="chat-avatar" src="{avatar_uri(persona_key)}" alt="{persona_name} avatar" width="58" height="64"><div><strong id="chat-name">{persona_name}</strong><span id="chat-role">{html.escape(persona_role)}</span></div><span class="local-badge">LOCAL</span></div>{nova_button}
 <p class="chat-snapshot" id="chat-snapshot">Saved snapshot · not live market data</p>
 <div id="chat-log" role="log" aria-live="polite" aria-relevant="additions" aria-label="Agent conversation" tabindex="0"><p class="chat-placeholder">Select a suggested question or type below. Enable JavaScript for local chat; the dashboard remains usable without it.</p></div>
 <div id="chat-prompts" aria-label="Suggested questions"></div>
-<form id="chat-form"><label class="chat-label" for="chat-input">Ask about your workspace</label><div class="composer"><textarea id="chat-input" rows="2" maxlength="800" placeholder="Why aren't we trading?" required disabled></textarea><button id="chat-send" type="submit" disabled aria-label="Send message">↗</button></div></form>
+<form id="chat-form"><label class="chat-label" for="chat-input">Ask about your workspace</label><div class="composer"><textarea id="chat-input" rows="2" maxlength="800" placeholder="Ask a question…" required disabled></textarea><button id="chat-send" type="submit" disabled aria-label="Send message">↗</button></div></form>
 <div class="chat-bottom"><span>Read-only · no network · no orders</span><span id="chat-usage" hidden></span><span class="chat-buttons"><button id="chat-expand" type="button" aria-pressed="false" disabled>Expand chat</button><button id="chat-clear" type="button" disabled>Clear chat</button></span></div>
 <p class="chat-privacy">Don’t paste keys. Messages stay in memory and clear on refresh. Replies use only the saved snapshot and supported topics.</p>
 <noscript><p class="notice">Local chat needs JavaScript. No remote service or API key is required.</p></noscript></aside>'''
@@ -275,7 +275,7 @@ def render_chat(d, agents, *, studio=None):
         markup = markup.replace('Read-only · no network · no orders', 'Local server · no chat orders')
         markup = markup.replace('Replies use only the saved snapshot and supported topics.', 'Replies read current local records. Houston: type reconcile for a dry diagnostic cycle.')
         if studio.get('generative'):
-            markup = markup.replace('Local snapshot guide · not generative AI', 'Generative replies (Anthropic API) · local records only · no orders')
+            markup = markup.replace('Local snapshot guide · not generative AI', 'Generative replies (Anthropic API) · read-only tools · no orders')
             markup = markup.replace('<span class="local-badge">LOCAL</span>', '<span class="local-badge">LOCAL + API</span>')
             markup = markup.replace('Don’t paste keys. Messages stay in memory and clear on refresh.',
                                     'Don’t paste keys. Your questions and sanitized local records are sent to Anthropic’s API. Memory is per agent, in this process only; Clear chat erases it.')

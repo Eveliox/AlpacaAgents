@@ -84,7 +84,7 @@
 
   function persona() { return data.agents.find(a => a.id === active); }
   function history() {
-    if (!threads.has(active)) threads.set(active, [{who: "agent", text: persona().intro, source: "Local, rule-based guide · no generative model connected"}]);
+    if (!threads.has(active)) threads.set(active, [{who: "agent", text: persona().intro, source: studio && studio.generative ? "Assistant introduction · read-only tools" : "Local, rule-based guide · no generative model connected"}]);
     return threads.get(active);
   }
   // Markdown-lite rendered as DOM nodes only: bold, inline code, bullets, numbered
@@ -342,6 +342,34 @@
       : `Snapshot rendered ${Math.floor(elapsed / 60000)} min ago · not live`;
     document.getElementById("chat-snapshot").textContent = text;
   }
+  // Section links reveal their destination even when a role filter hid it.
+  // These are local anchors, not routes or trading controls.
+  function navigateSection(hash) {
+    if (!/^#[a-z-]+$/.test(hash)) return;
+    const target = document.getElementById(hash.slice(1));
+    if (!target) return;
+    if (target.matches('section[data-agent]')) document.getElementById('agent-all').checked = true;
+    const details = target.querySelector(':scope > details');
+    if (details && details.querySelector('summary').textContent === 'Show technical details') details.open = true;
+    document.querySelectorAll('.sidebar nav a').forEach(link => {
+      if (link.getAttribute('href') === hash) link.setAttribute('aria-current', 'location');
+      else link.removeAttribute('aria-current');
+    });
+    if (hash === '#agent-chat') input.focus({preventScroll: true});
+    else { target.tabIndex = -1; target.focus({preventScroll: true}); }
+    target.scrollIntoView({behavior: 'auto', block: 'start'});
+  }
+  document.querySelectorAll('.sidebar a, .chat-jump, .skip-link').forEach(link => {
+    link.addEventListener('click', event => {
+      event.preventDefault();
+      const hash = link.getAttribute('href');
+      if (location.hash !== hash) location.hash = hash;
+      navigateSection(hash);
+    });
+  });
+  window.addEventListener('hashchange', () => navigateSection(location.hash));
+  if (location.hash) navigateSection(location.hash);
+
   const expand = document.getElementById("chat-expand");
   if (expand) {
     expand.disabled = false;

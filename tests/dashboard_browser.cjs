@@ -1,6 +1,7 @@
 /* Optional real-browser smoke test: Node 22 + Chrome/Chromium. No npm packages.
    Generate dashboard first, then: node tests/dashboard_browser.cjs [path/to/dashboard.html]
    Served-mode integration (synthetic records, no keys): node tests/dashboard_browser.cjs --served
+   Generative layout + markdown (fake model, no keys): node tests/dashboard_browser.cjs --generative
    Set CHROME_PATH if Chrome isn't in a usual location. Uses an isolated temp profile.
 */
 const {spawn} = require('node:child_process');
@@ -14,12 +15,14 @@ const pause = ms => new Promise(r => setTimeout(r, ms));
   const chrome = [process.env.CHROME_PATH, 'C:/Program Files/Google/Chrome/Application/chrome.exe',
     '/usr/bin/google-chrome', '/usr/bin/chromium'].find(p => p && fs.existsSync(p));
   assert(chrome, 'Chrome not found; set CHROME_PATH');
-  const served = process.argv[2] === '--served';
+  const generative = process.argv[2] === '--generative';
+  const served = process.argv[2] === '--served' || generative;
   let fixture, fixtureDir, url;
   const file = path.resolve(served ? 'runtime/dashboard.html' : process.argv[2] || 'runtime/dashboard.html');
+  if (generative) fs.mkdirSync(path.dirname(file), {recursive:true});
   if (served) {
     fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alpaca-studio-'));
-    fixture = spawn(process.env.PYTHON || 'python', ['-m', 'tests.studio_browser_fixture', fixtureDir], {stdio: ['pipe', 'pipe', 'inherit']});
+    fixture = spawn(process.env.PYTHON || 'python', ['-m', 'tests.studio_browser_fixture', fixtureDir, ...(generative ? ['--generative'] : [])], {stdio: ['pipe', 'pipe', 'inherit']});
     url = await new Promise((resolve, reject) => {
       let out = '';
       const timer = setTimeout(() => {fixture.kill(); reject(new Error('Fixture startup timeout'));}, 10000);
@@ -91,6 +94,11 @@ const pause = ms => new Promise(r => setTimeout(r, ms));
     }
     assert(await evaluate("!document.querySelector('#chat-input').disabled"),'CSP blocked the bundled script / chat failed to initialize');
     assert(await evaluate("[...document.querySelectorAll('img')].every(i => i.complete && i.naturalWidth > 0)"),'Avatar failed to load');
+    if (generative) {
+      assert.equal(await evaluate("document.getElementById('chat-agent').value"), 'nova');
+      assert.match(await evaluate("document.querySelector('#chat-log .message-source').textContent"), /read-only tools/);
+      assert(await evaluate("!document.querySelector('[data-chat-agent=nova]').disabled"));
+    }
     for (const agent of ['all','houston','star','moon','astra']) {
       await evaluate(`document.getElementById('agent-${agent}').click()`);
       const visible = await evaluate("[...document.querySelectorAll('[data-agent]')].filter(e => getComputedStyle(e).display !== 'none').map(e => e.dataset.agent)");
@@ -101,9 +109,23 @@ const pause = ms => new Promise(r => setTimeout(r, ms));
       } else assert.equal(new Set(visible).size,4);
       assert(await evaluate("getComputedStyle(document.querySelector('.hero')).display !== 'none'"));
     }
+    // Sidebar anchors reset a conflicting role filter and expose technical details.
+    await evaluate("document.getElementById('agent-moon').click();document.querySelector('.sidebar a[href=\"#research-lab\"]').click()");
+    assert(await evaluate("document.getElementById('agent-all').checked && getComputedStyle(document.getElementById('research-lab')).display !== 'none'"));
+    assert.equal(await evaluate("document.querySelector('.sidebar [aria-current]').getAttribute('href')"), '#research-lab');
+    await evaluate("document.querySelector('.sidebar a[href=\"#cycles\"]').click()");
+    assert(await evaluate("document.querySelector('#cycles details').open"));
+    assert.equal(await evaluate('document.activeElement.id'), 'cycles');
+    await evaluate("document.querySelector('.sidebar a[href=\"#overview\"]').click()");
+    assert(await evaluate("document.querySelector('.hero').getBoundingClientRect().top < document.querySelector('.agent-summary').getBoundingClientRect().top"));
     await evaluate("document.getElementById('agent-all').click();document.querySelector('[data-chat-agent=moon]').click()");
     assert.equal(await evaluate('document.activeElement.id'),'chat-input');
     assert.match(await question('Explain my risk limits'),/\$100/);
+    if (generative) {
+      assert(await evaluate("!!document.querySelector('#chat-log .message-heading') && !!document.querySelector('#chat-log strong') && !!document.querySelector('#chat-log li')"));
+      assert.equal(await evaluate("document.querySelector('#chat-log a').getAttribute('rel')"), 'noopener noreferrer');
+      assert(await evaluate("!document.querySelector('#chat-log img') && !globalThis.injected"));
+    }
     assert.match(await question('Buy QQQ now'),/can't place/);
     assert.match(await question('Explain QQQ results'),/NOT option profits/);
     // Keyboard submit, independent threads, clearing, no unsafe HTML rendering.
@@ -127,13 +149,19 @@ const pause = ms => new Promise(r => setTimeout(r, ms));
     for(let i=0;i<23;i++) await question('Explain my risk limits');
     assert.equal(await evaluate("document.querySelectorAll('#chat-log .chat-message').length"),41);
     await evaluate("document.getElementById('chat-clear').click();document.getElementById('agent-all').click()");
-    for(const width of [1600,1200,390]) {
+    for(const width of [1600,1440,1200,1024,768,390]) {
       await send('Emulation.setDeviceMetricsOverride',{width,height:1100,deviceScaleFactor:1,mobile:width<600});
       assert(await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), `horizontal overflow ${width}`);
+      await evaluate("document.getElementById('chat-expand').click()");
+      assert(await evaluate("document.getElementById('chat-expand').getAttribute('aria-pressed') === 'true'"));
+      assert(await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), `expanded chat overflow ${width}`);
+      await evaluate("document.getElementById('chat-expand').click();document.querySelector('.chat-jump').click()");
+      assert.equal(await evaluate('document.activeElement.id'), 'chat-input');
+      assert(await evaluate("document.getElementById('chat-input').getBoundingClientRect().bottom <= window.innerHeight"), `composer unreachable ${width}`);
       await evaluate('document.activeElement.blur();window.scrollTo(0,0)');
       await pause(250);
       const image = await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
-      fs.writeFileSync(path.join(served ? fixtureDir : path.dirname(file),`crew-${width}.png`),Buffer.from(image.data,'base64'));
+      fs.writeFileSync(path.join(served && !generative ? fixtureDir : path.dirname(file),`crew-${generative ? 'generative-' : ''}${width}.png`),Buffer.from(image.data,'base64'));
     }
     if (served) {
       assert.match(await evaluate("document.querySelector('#chat-snapshot').textContent"), /Live local records.*unknown/);

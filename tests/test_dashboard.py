@@ -93,6 +93,32 @@ class DashboardAgentTests(unittest.TestCase):
         self.assertIn('form-action &#x27;none&#x27;', page)
         self.assertIn('id="chat-form"', page)
 
+    def test_navigation_targets_are_unique_and_overview_precedes_agent_cards(self):
+        from html.parser import HTMLParser
+
+        class Navigation(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.ids, self.targets = [], []
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if "id" in attrs:
+                    self.ids.append(attrs["id"])
+                if tag == "a" and attrs.get("href", "").startswith("#"):
+                    self.targets.append(attrs["href"][1:])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = render(collect(Path(tmp), now=NOW))
+        parsed = Navigation()
+        parsed.feed(page)
+        self.assertEqual(len(parsed.ids), len(set(parsed.ids)))
+        self.assertTrue(set(parsed.targets).issubset(parsed.ids))
+        self.assertTrue({"overview", "research-lab", "open-positions", "risk-checks", "cycles", "agent-chat"}.issubset(parsed.targets))
+        self.assertLess(page.index('id="overview"'), page.index('<section class="agent-summary'))
+        self.assertIn('Skip to overview', page)
+        self.assertIn('No live-money orders.', page)
+
     def test_risk_blockers_are_escaped_in_moon_view(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = collect(Path(tmp), now=NOW)
@@ -183,6 +209,33 @@ class DashboardWorkspaceTests(unittest.TestCase):
             self.assertIn(text, page)
         self.assertNotIn("$25", page)
         self.assertFalse(any(data["approvals"].values()))
+
+    def test_research_comparison_uses_shared_zero_centered_scale_and_no_fake_missing_marks(self):
+        from alpaca_agents.dashboard import _research, _research_plot, _research_value
+        report = {"symbol": "<unsafe>", "file": "report.json", "summary": {
+            "first": {"expectancy_r": 1, "median_r": -1, "profit_factor": 1.5, "max_loss_r": -3, "resolved": 20},
+            "second": {"expectancy_r": 2, "median_r": 0},
+            "missing": {"expectancy_r": None, "median_r": "NaN"}}}
+        page = _research([report])
+        self.assertEqual(page.count('<svg class="r-chart"'), 2)
+        self.assertIn('cx="77.50"', page)
+        self.assertIn('cx="32.50"', page)
+        self.assertIn('cx="100.00"', page)
+        self.assertIn('cx="55.00"', page)  # actual recorded zero, not missing
+        self.assertIn('Shared axis: −2.00 to +2.00 R', page)
+        self.assertIn('Mean 1.00 R; median -1.00 R', page)
+        self.assertIn('Unknown', page)
+        self.assertNotIn('<unsafe>', page)
+        self.assertIn('&lt;unsafe&gt;', page)
+        for field in ('Mean R', 'Median R', 'Profit factor', 'Worst R', 'Resolved', 'NOT modeled'):
+            self.assertIn(field, page)
+        for value in (None, 'NaN', 'Infinity', '-Infinity', {}, '<svg onload=bad>'):
+            self.assertIsNone(_research_value(value))
+            self.assertNotIn('<svg', _research_plot(_research_value(value), Decimal(1), Decimal(2)))
+        empty = _research([])
+        self.assertNotIn('<svg', empty)
+        self.assertNotIn('Shared axis', empty)
+        self.assertIn('No backtest reports yet', empty)
 
     def test_runtime_content_is_escaped_in_new_panels(self):
         with tempfile.TemporaryDirectory() as tmp:

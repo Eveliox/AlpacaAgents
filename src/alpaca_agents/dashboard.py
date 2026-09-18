@@ -143,7 +143,8 @@ def _panel(agent, title, body, *, wide=False, collapsed=False):
     name = next(name for key, name, _, _ in AGENTS if key == agent)
     if collapsed:
         body = f'<details><summary>Show technical details</summary>{body}</details>'
-    return (f'<section data-agent="{agent}" class="{"wide" if wide else ""}">'
+    anchor = '-'.join(title.lower().replace('&', '').split())
+    return (f'<section id="{anchor}" data-agent="{agent}" class="{"wide" if wide else ""}">'
             f'<span class="agent-owner">{name}</span><h2>{_e(title)}</h2>{body}</section>')
 
 
@@ -260,21 +261,50 @@ def _number(value, places=2):
         return "—"
 
 
+def _research_value(value):
+    try:
+        number = Decimal(str(value))
+        return number if number.is_finite() else None
+    except InvalidOperation:
+        return None
+
+
+def _research_plot(mean, median, scale):
+    # Both marks share a symmetric scale across every study. Missing is not zero.
+    if mean is None or median is None:
+        return Html('<span class="dim">Unknown</span>')
+    x1, x2 = (float(Decimal(55) + value / scale * 45) for value in (mean, median))
+    label = f'Mean {mean:.2f} R; median {median:.2f} R. Center line is zero.'
+    return Html(f'<svg class="r-chart" viewBox="0 0 110 32" role="img" aria-label="{_e(label)}">'
+                '<path d="M10 16H100" stroke="#49404f"/><path d="M55 4V28" stroke="#797080" stroke-dasharray="2 2"/>'
+                f'<path d="M{x1:.2f} 16H{x2:.2f}" stroke="#9c80a7" stroke-width="2"/>'
+                f'<circle cx="{x1:.2f}" cy="16" r="4" fill="#d39acc"/>'
+                f'<circle cx="{x2:.2f}" cy="16" r="3" fill="#8fe1c7" stroke="#19191e"/></svg>')
+
+
 def _research(reports):
+    studies = [(report, playbook, _dict(summary)) for report in reports
+               for playbook, summary in _dict(report.get("summary")).items()]
+    values = [_research_value(s.get(key)) for _, _, s in studies for key in ("expectancy_r", "median_r")]
+    scale = max([Decimal(1)] + [abs(v) for v in values if v is not None])
     rows = []
-    for report in reports:
-        for playbook, summary in _dict(report.get("summary")).items():
-            s = _dict(summary)
-            rows.append((report.get("symbol"), playbook,
-                         f"{report.get('first_bar', '?')} → {report.get('last_bar', '?')}",
-                         s.get("resolved"), s.get("no_trade", "—"), _number(s.get("expectancy_r"), 2), _number(s.get("median_r"), 2),
-                         _number(s.get("profit_factor"), 2), _number(s.get("max_loss_r"), 1),
-                         "Count threshold met; not statistical proof" if s.get("sample_sufficient") is True else "Small / unknown sample",
-                         report.get("file")))
+    for report, playbook, s in studies:
+        study = Html(f'<strong class="research-study">{_e(report.get("symbol"))}<small>{_e(playbook)}</small></strong>')
+        rows.append((study, _research_plot(_research_value(s.get("expectancy_r")), _research_value(s.get("median_r")), scale),
+                     _number(s.get("expectancy_r"), 2), _number(s.get("median_r"), 2),
+                     _number(s.get("profit_factor"), 2), _number(s.get("max_loss_r"), 1), s.get("resolved")))
+    sources = ''.join(f'<li><strong>{_e(report.get("symbol"))} · {_e(playbook)}</strong>: '
+                      f'{_e(report.get("first_bar", "?"))} → {_e(report.get("last_bar", "?"))} · '
+                      f'{_e(s.get("no_trade", "Unknown"))} no trade · '
+                      f'{"Count threshold met; not statistical proof" if s.get("sample_sufficient") is True else "Small / unknown sample"} · '
+                      f'{_e(report.get("file"))}</li>' for report, playbook, s in studies)
     return _panel("star", "Research lab", '<p class="research-warning">Underlying-price research only · options P&amp;L is NOT modeled.</p>' +
-                  _table(["Symbol", "Playbook", "Bar coverage", "Resolved", "No trade", "Mean R", "Median R", "Profit factor", "Worst R", "Sample note", "Source"],
-                         rows, numeric={3, 4, 5, 6, 7, 8},
+                  (f'<div class="research-legend"><span><i></i>Mean R</span><span><i class="median-key"></i>Median R</span>'
+                   f'<span>Shared axis: −{scale:.2f} to +{scale:.2f} R · center = 0</span></div>' if studies else '') +
+                  _table(["Study", "Mean / median", "Mean R", "Median R", "Profit factor", "Worst R", "Resolved"],
+                         rows, numeric={2, 3, 4, 5, 6},
                          empty="No backtest reports yet. Save reports as runtime/bt-SYMBOL.json to compare them here.") +
+                  (f'<details><summary>Sources, coverage &amp; sample notes</summary><ul class="small dim">{sources}</ul></details>' if studies else '') +
                   '<p class="dim small">R measures the underlying move relative to the modeled stop distance, not dollars earned on an option. '
                   'Fees, spreads, IV and time decay are absent. Mean R is dominated by gap outliers: when the median is negative while the mean is positive, '
                   'a few trades carry the result. Win/loss is the sign of R; "no trade" counts fills already past the stop or target that a rational '
@@ -297,7 +327,7 @@ def render(d: dict, *, studio=None) -> str:
     positions_count = f"{len(d['inventory'])} / 2" if ledger_known else "Unknown"
     rec_label = "No controller check yet" if not rec else "Passed at last check" if rec.get("ok") is True else "Blocked at last check"
     rec_cls = "ok" if rec.get("ok") is True and fresh_cls == "ok" else "warn"
-    status = f'''<section class="wide hero"><div class="section-top"><div><span class="eyebrow">Mission overview</span><h2 class="hero-title">Your paper workspace</h2></div>{_pill(d['control'], control_cls)}</div>
+    status = f'''<section class="wide hero" id="overview"><div class="section-top"><div><span class="eyebrow">Account overview · options only</span><h2 class="hero-title">Paper trading</h2></div>{_pill(d['control'], control_cls)}</div>
 <p class="dim">{mode_text}. One shared account and risk budget across all four roles.</p>
 <div class="metrics"><div class="metric"><span>Recorded net today · ET</span><strong>{net}</strong></div>
 <div class="metric"><span>Cumulative daily loss</span><strong class="{loss_cls}">{loss}</strong><span>{'Breaker latched' if d['latched'] else 'Breaker is not a maximum-loss guarantee'}</span></div>
@@ -305,7 +335,7 @@ def render(d: dict, *, studio=None) -> str:
 <div class="metric"><span>Outstanding intents</span><strong>{len(d['live']) if d['orders_known'] else 'Unknown'}</strong></div></div>
 <div class="section-top"><p>{_pill(rec_label, rec_cls)} {_pill(freshness, fresh_cls)}</p><span class="dim small">Last cycle: {_e(t(last.get('finished_at')))}</span></div>
 <p class="dim small">Last cycle submission: {'enabled (paper)' if last.get('submit') is True else 'dry run' if last else 'unknown'}. Snapshot date: {_e(d['today'])} (ET). Controller running status is not verified.</p>
-<div class="next-action"><div><span class="eyebrow">What to do next</span><p><strong class="{action_cls}">{_e(title)}</strong></p></div><div><p>{_e(advice)}</p>{_command(command)}</div></div>
+<div class="next-action"><div><span class="eyebrow">Next step</span><p><strong class="{action_cls}">{_e(title)}</strong></p></div><div><p>{_e(advice)}</p><details><summary>Show diagnostic command</summary>{_command(command)}</details></div></div>
 <p class="dim small">Snapshot only. Age is calculated when rendered, not continuously. Refreshing this file does not fetch broker data.</p></section>'''
 
     panels = []
@@ -318,10 +348,10 @@ def render(d: dict, *, studio=None) -> str:
     for key, name, role, description in AGENTS:
         panels.append(f'<section class="agent-summary agent-{key}" data-agent="{key}">'
                       f'<div class="avatar-stage"><img src="{avatar_uri(key)}" alt="{name} · {ART[key]}" width="110" height="124"></div>'
-                      f'<span class="eyebrow">{_e(role)}</span><h2>{name}</h2><p class="role">{_e(agent_states[key])}</p><p>{_e(description)}</p>'
+                      f'<span class="eyebrow">{_e(role)}</span><h2>{name}</h2><p class="role">{_e(agent_states[key])}</p>'
                       f'<button class="talk-button" type="button" data-chat-agent="{key}" disabled>Talk to {name} <span aria-hidden="true">↗</span></button></section>')
     crew = ''.join(panels)
-    panels = []
+    panels = [_research(d["research"])]
 
     reasons = _list(rec.get("reasons"))
     risk = '<dl><dt>Maximum entry risk</dt><dd>$100 including estimated fees</dd><dt>Concurrent positions</dt><dd>2</dd><dt>Daily loss breaker</dt><dd>$40 cumulative losses; wins do not offset</dd></dl>'
@@ -345,7 +375,6 @@ def render(d: dict, *, studio=None) -> str:
     ideas = _table(["Symbol", "Playbook", "Thesis"], [(r.get("symbol"), r.get("playbook"), r.get("thesis")) for r in _records(shadow.get("shadow"))], empty="No shadow ideas recorded. Check errors and report age before interpreting this as no setups.")
     scan_body = (f'<p>{_pill(scan_age, scan_cls)} <span class="dim small">{_e(t(shadow.get("generated_at")))}</span></p>' + errors + ideas) if shadow else _empty("Run a shadow scan with realtime options access. Stocks Advanced supports stock research, not realtime option selection.")
     panels.append(_panel("star", "Scan health & ideas", scan_body))
-    panels.append(_research(d["research"]))
 
     closed = _table(["Day", "Contract", "Booked fill P&L"],
                     [(r["trading_day"], r["contract"], Html(f'<span class="{"ok" if r["pnl_units"] >= 0 else "bad"}">${Decimal(r["pnl_units"]) / 1_000_000:.2f}</span>')) for r in d["closed"]], numeric={2},
@@ -398,9 +427,22 @@ def render(d: dict, *, studio=None) -> str:
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Mission Control · AlpacaAgent paper</title>
 <meta http-equiv="Content-Security-Policy" content="{_e(csp)}">
 <meta name="viewport" content="width=device-width,initial-scale=1"><style>{CSS}</style></head><body>
-<header><div class="brand"><div class="brand-mark" aria-hidden="true">✦</div><div><span class="eyebrow">Your personal trading workspace</span><h1>Mission Control</h1><p>Research with your crew. Keep risk in view.</p></div></div><div class="header-actions"><a class="chat-jump" href="#agent-chat">Talk to the crew ↗</a><div class="meta">{_pill('PAPER ONLY · READ-ONLY', 'warn')}<p>Rendered {_e(t(d['now']))}</p></div></div></header>
-<div class="workspace"><fieldset class="agent-picker"><legend>Choose a workspace. Filters change the view, never trading permissions.</legend>{filters}<main>{crew}{status}{''.join(panels)}</main></fieldset>{chat}</div>
-<footer>{footer}</footer>{scripts}</body></html>'''
+<a class="skip-link" href="#overview">Skip to overview</a>
+<aside class="sidebar" aria-label="Workspace navigation">
+<a class="wordmark" href="#overview" aria-label="Alpaca overview"><span class="brand-mark" aria-hidden="true">a/</span>alpaca<span class="wordmark-dot">.</span></a>
+<div class="workspace-label"><span class="workspace-icon" aria-hidden="true">P</span><div>Personal workspace<small>Options · paper account</small></div></div>
+<nav aria-label="Dashboard"><span class="nav-label">Workspace</span>
+<a href="#overview" aria-current="location"><span aria-hidden="true">▦</span>Overview</a>
+<a href="#open-positions"><span aria-hidden="true">▤</span>Positions</a>
+<a href="#research-lab"><span aria-hidden="true">↗</span>Research</a>
+<a href="#scan-health-ideas"><span aria-hidden="true">⌕</span>Scanner</a>
+<a href="#risk-checks"><span aria-hidden="true">◇</span>Risk &amp; limits</a>
+<a href="#cycles"><span aria-hidden="true">≡</span>Activity</a>
+<a href="#agent-chat"><span aria-hidden="true">◌</span>Chat</a>
+</nav><div class="sidebar-foot"><span class="paper-dot" aria-hidden="true"></span>Paper environment<p>No live-money orders.<br>Controls are read-only.</p></div></aside>
+<div class="app-shell"><header><div><span class="eyebrow">Workspace / Overview</span><h1>Dashboard</h1></div><div class="header-actions"><div class="meta"><span class="snapshot-label">Local snapshot</span><p>Rendered {_e(t(d['now']))}</p></div>{_pill('PAPER ONLY · READ-ONLY', 'warn')}<a class="chat-jump" href="#agent-chat">Open chat <span aria-hidden="true">↗</span></a></div></header>
+<div class="workspace"><fieldset class="agent-picker"><legend>Filter by role · changes the view, never trading permissions.</legend>{filters}<main>{status}{crew}{''.join(panels)}</main></fieldset>{chat}</div>
+<footer>{footer}</footer></div>{scripts}</body></html>'''
 
 
 def build(runtime: Path, output: Path, *, now: datetime | None = None) -> Path:

@@ -449,6 +449,14 @@ python -m alpaca_agents.dashboard
 Start-Process runtime\dashboard.html
 ```
 
+The dashboard uses a compact dark layout with sidebar links to **Overview,
+Positions, Research, Scanner, Risk & limits, Activity, and Chat**. Account
+status comes first; agent cards are shortcuts rather than the main content.
+Research plots compare recorded mean and median on a shared zero-centered R
+axis, alongside profit factor, worst R and sample counts. They are not equity
+curves or option P&L. Missing values have no plotted mark. All assets remain
+bundled; no remote fonts, chart libraries or additional network calls.
+
 Choose **All agents / Houston / Star / Moon / Astra** to filter panels. Global
 status stays visible in every view. The filters work offline without JavaScript;
 use Tab and arrow keys to navigate them with a keyboard. Filtering does not arm
@@ -548,9 +556,9 @@ replies pass through the credential redactor; anything that looks like a key in
 
 #### Offline snapshot (existing launcher)
 
-Click **Talk to Houston / Star / Moon / Astra** on a character card, or use the
-agent dropdown in the chat panel. On a phone, **Talk to the crew** at the top
-jumps directly to chat. Filters also switch the conversation persona.
+Click **Talk to Houston / Star / Moon / Astra** on an agent shortcut, or use the
+agent dropdown in the chat panel. **Open chat** at the top jumps directly to
+the composer, including on a phone. Filters also switch the conversation persona.
 
 Try:
 - Houston: **Show my positions**, **Why aren't we trading?**
@@ -620,6 +628,8 @@ python -m alpaca_agents.dashboard
 node tests/dashboard_browser.cjs
 # Real HTTP + browser path, isolated synthetic runtime; no credentials:
 node tests/dashboard_browser.cjs --served
+# Generative UI with a scripted fake model (no API key / provider requests):
+node tests/dashboard_browser.cjs --generative
 ```
 
 The browser smoke test uses an isolated temporary profile and checks avatars,
