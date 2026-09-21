@@ -17,6 +17,7 @@ import time
 
 from .dashboard import AGENTS, collect, render
 from .dashboard_chat import answer_for, conversation_data, redact_secrets, script_policy
+from .agent_desk import read_state as read_desk, route as desk_route, response as desk_response
 
 
 def _pick(row, keys):
@@ -204,6 +205,9 @@ class Studio:
     def snapshot(self):
         return display_snapshot(collect(self.runtime, now=self.clock()))
 
+    def agent_desk(self):
+        return read_desk(self.runtime, now=self.clock())
+
     def context(self, d):
         context = conversation_data(d, AGENTS, live=True, generative=self.llm is not None)
         context['topics']['briefing']['text'] += '\nController schedule: ' + self.schedule + '.'
@@ -316,17 +320,26 @@ class Studio:
                     return
                 # Root is the same-origin bootstrap, not an unauthenticated API.
                 if self.command == "GET" and self.path == "/":
-                    page = app.call(lambda: render(app.snapshot(), studio=app.bootstrap()))
+                    page = app.call(lambda: render(app.snapshot(), studio=app.bootstrap(), desk=app.agent_desk()))
                     self.respond(200, page.encode("utf-8"), "text/html; charset=utf-8")
                     return
-                if self.path not in ("/api/snapshot", "/api/ask", "/api/clear"):
+                desk = desk_route(self.path)
+                if desk is None and self.path not in ("/api/snapshot", "/api/ask", "/api/clear"):
                     self.respond(404)
                     return
                 tokens = self.headers.get_all("X-Studio-Token", [])
                 if len(tokens) != 1 or not secrets.compare_digest(tokens[0].encode('utf-8'), app.token.encode('ascii')):
                     self.respond(401)
                     return
-                if self.path == "/api/snapshot" and self.command == "GET":
+                if desk is not None:
+                    if self.command != 'GET':
+                        self.respond(405)
+                        return
+                    result = app.call(lambda: desk_response(app.agent_desk(), *desk))
+                    if result is None:
+                        self.respond(404)
+                        return
+                elif self.path == "/api/snapshot" and self.command == "GET":
                     def current():
                         d = app.snapshot()
                         visible = dict(d)

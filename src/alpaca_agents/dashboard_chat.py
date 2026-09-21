@@ -241,18 +241,25 @@ def safe_json(data):
     return json.dumps(data, ensure_ascii=True, allow_nan=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
 
 
+def bundled_script():
+    return '\n'.join(files("alpaca_agents").joinpath("assets", name).read_text(encoding="utf-8")
+                     for name in ("agent_desk.js", "dashboard.js"))
+
+
 def script_policy(*, live=False):
-    javascript = files("alpaca_agents").joinpath("assets", "dashboard.js").read_text(encoding="utf-8")
+    javascript = bundled_script()
     digest = base64.b64encode(hashlib.sha256(javascript.encode("utf-8")).digest()).decode("ascii")
     connect = "'self'" if live else "'none'"
     return f"default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'sha256-{digest}'; connect-src {connect}; form-action 'none'; base-uri 'none'; object-src 'none'"
 
 
-def render_chat(d, agents, *, studio=None):
+def render_chat(d, agents, *, studio=None, desk=None):
     data = conversation_data(d, agents, live=studio is not None, generative=bool(studio and studio.get('generative')))
+    if desk is not None:
+        data['agent_desk'] = desk
     if studio is not None:
         data['studio'] = studio  # In-memory HTTP bootstrap only; never written by build().
-    javascript = files("alpaca_agents").joinpath("assets", "dashboard.js").read_text(encoding="utf-8")
+    javascript = bundled_script()
     csp = script_policy(live=studio is not None)
     generative = bool(studio and studio.get('generative'))
     default = "nova" if generative else "astra"

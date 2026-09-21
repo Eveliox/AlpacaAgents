@@ -114,7 +114,9 @@ class ChatTests(unittest.TestCase):
 
         page = Page()
         page.feed(render(self.data()))
-        js = files("alpaca_agents").joinpath("assets", "dashboard.js").read_text(encoding="utf-8")
+        js = '\n'.join(files("alpaca_agents").joinpath("assets", name).read_text(encoding="utf-8")
+                       for name in ("agent_desk.js", "dashboard.js"))
+        self.assertIn('<script>' + js + '</script>', render(self.data()))
         digest = base64.b64encode(hashlib.sha256(js.encode()).digest()).decode()
         for expected in ("connect-src 'none'", "form-action 'none'", "base-uri 'none'", f"script-src 'sha256-{digest}'"):
             self.assertIn(expected, page.policy)

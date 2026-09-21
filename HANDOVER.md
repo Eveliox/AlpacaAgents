@@ -18,6 +18,7 @@ Repo: https://github.com/Eveliox/AlpacaAgents
 | 2 Rules | `rules.py` | **Moon** | Pure, deterministic. $100 max risk incl. fees, 2 positions, $40 daily loss breaker, cash semantics, fail-closed. No I/O, no LLM. |
 | 3 Executor | `executor/` | **Houston** | Only broker boundary. Paper URL hardcoded. Journal with reserve→claim→submit, single-use auth, stored bodies. Reconciliation with real checks. Exit manager. Manual `release-intent` / `flatten`. |
 | 4 Dashboard | `dashboard*.py`, `assets/` | **Astra** | Compact dark/plum layout, sidebar navigation, status-first cards and mean/median R comparison plots. Agent avatars (owner's artwork) as small shortcuts. Offline rule-based chat (NOT an LLM); optional served generative chat. CSP, no external assets, no trading controls. |
+| Agent Desk | `agent_desk.py`, `agent_desk_view.py`, `assets/agent_desk.js` | — | Read-only cycle browser, six functional views, actual stage flow, proposal/risk inspection. Exact decision-key journal links; historical verdicts separated from current journal status. 20-record bounded history; served polling, not live stage events. No new models or order/approval paths. |
 | Orchestration | `controller.py` | — | One cycle or `--every N` loop. Runtime lock (one controller per dir). Never submits without `--submit`. |
 | Generative agents | `llm_chat.py` | four + **Nova** (general assistant, generative-only, default) | Optional. Anthropic Messages API via stdlib HTTPS. Tools: read_snapshot/read_backtest/read_cycles/explain_rule, plus read_market/read_news through the allowlisted Massive client when its key is loaded. Falls back to the rule router. Off without `ANTHROPIC_API_KEY`. |
 | Local chat server | `studio.py` | — | `controller --serve`, loopback-only, fresh local records per question, token/Origin/Host guards. Exact Houston `reconcile` requests a dry diagnostic. No order routes. |
@@ -95,6 +96,8 @@ python -m unittest discover -s tests
 node --test tests/test_dashboard_chat.cjs       # includes Python/browser router parity
 python -m alpaca_agents.dashboard && node tests/dashboard_browser.cjs   # Chrome headless smoke test
 node tests/dashboard_browser.cjs --served      # isolated synthetic runtime, real HTTP, no keys
+node tests/agent_desk_browser.cjs              # Agent Desk, synthetic journal + HTTP
+node tests/agent_desk_browser.cjs --static      # offline/no-JS fallback
 ```
 CI: `.github/workflows/tests.yml` runs Python 3.11–3.13 + Node tests.
 
@@ -111,6 +114,14 @@ CI: `.github/workflows/tests.yml` runs Python 3.11–3.13 + Node tests.
 - Tests are the spec. Add tests for behaviour changes; the full-lifecycle controller test (`tests/test_controller.py`) runs against a stateful fake broker and has caught 4 real bugs.
 
 ## 8. Known gaps (honest list)
+
+- Agent Desk Phase A is read-only observability (`docs/PLAN-agent-desk.md`). Cycles
+  contain completed summaries, not live stage events or frozen market inputs.
+  Prior/edge/Kelly models are not implemented; no per-agent accuracy or consensus
+  probability. Phase B event instrumentation remains deferred.
+- DISABLED controller loops skip entry scanning and automatic exits; EXITS_ONLY
+  skips entries. PLAYBOOK.md now distinguishes diagnostics/standalone scans from
+  end-to-end no-submission entry validation. Do not arm to animate the desk.
 
 - Spreads: `trend_debit_spread` is scanned but multi-leg execution is not implemented.
 - `OPASN`/`OPEXC` (assignment/exercise) block reconciliation; only worthless `OPEXP` is handled.

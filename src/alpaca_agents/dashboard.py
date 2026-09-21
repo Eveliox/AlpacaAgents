@@ -14,6 +14,8 @@ import tempfile
 
 from .dashboard_style import CSS as BASE_CSS
 from .dashboard_chat import ART, avatar_uri, render_chat
+from .agent_desk import read_state as read_desk
+from .agent_desk_view import CSS as DESK_CSS, empty_state, render_desk
 from .executor.eastern import eastern_date
 from .gateway import control_mode
 from .scanner.scan import PLAYBOOKS
@@ -24,7 +26,7 @@ AGENTS = (
     ("moon", "Moon", "Rules Engine", "Checks cash, position limits and risk. Same inputs, same decision."),
     ("astra", "Astra", "Dashboard & Notifications", "Explains what happened and surfaces alerts. Read-only."),
 )
-CSS = BASE_CSS + "\n".join(
+CSS = BASE_CSS + DESK_CSS + "\n".join(
     f'#agent-{key}:checked ~ main [data-agent]:not([data-agent="{key}"]){{display:none}}'
     for key, _, _, _ in AGENTS
 )
@@ -311,7 +313,8 @@ def _research(reports):
                   'executor would skip. Test out-of-sample, then validate option-level execution. No result here approves a playbook or proves an edge.</p>', wide=True)
 
 
-def render(d: dict, *, studio=None) -> str:
+def render(d: dict, *, studio=None, desk=None) -> str:
+    desk = desk or empty_state()
     t = lambda stamp: _t(stamp, d["today"])
     last = d["cycles"][0] if d["cycles"] else {}
     stages = _dict(last.get("stages"))
@@ -415,7 +418,7 @@ def render(d: dict, *, studio=None) -> str:
     filters = '<input class="agent-filter" type="radio" name="agent" id="agent-all" checked><label class="agent-tab" for="agent-all">All agents</label>'
     for key, name, _, _ in AGENTS:
         filters += f'<input class="agent-filter" type="radio" name="agent" id="agent-{key}"><label class="agent-tab" for="agent-{key}">{name}</label>'
-    chat, scripts, csp = render_chat(d, AGENTS, studio=studio)
+    chat, scripts, csp = render_chat(d, AGENTS, studio=studio, desk=desk)
     footer = ('Local snapshot · no broker requests from this page · no live-money orders. Regenerate with '
               '<code>python -m alpaca_agents.dashboard</code>, then refresh your browser. No API keys belong on this page.')
     if studio is not None:
@@ -433,6 +436,7 @@ def render(d: dict, *, studio=None) -> str:
 <div class="workspace-label"><span class="workspace-icon" aria-hidden="true">P</span><div>Personal workspace<small>Options · paper account</small></div></div>
 <nav aria-label="Dashboard"><span class="nav-label">Workspace</span>
 <a href="#overview" aria-current="location"><span aria-hidden="true">▦</span>Overview</a>
+<a href="#agent-desk"><span aria-hidden="true">⠿</span>Agent Desk</a>
 <a href="#open-positions"><span aria-hidden="true">▤</span>Positions</a>
 <a href="#research-lab"><span aria-hidden="true">↗</span>Research</a>
 <a href="#scan-health-ideas"><span aria-hidden="true">⌕</span>Scanner</a>
@@ -441,12 +445,13 @@ def render(d: dict, *, studio=None) -> str:
 <a href="#agent-chat"><span aria-hidden="true">◌</span>Chat</a>
 </nav><div class="sidebar-foot"><span class="paper-dot" aria-hidden="true"></span>Paper environment<p>No live-money orders.<br>Controls are read-only.</p></div></aside>
 <div class="app-shell"><header><div><span class="eyebrow">Workspace / Overview</span><h1>Dashboard</h1></div><div class="header-actions"><div class="meta"><span class="snapshot-label">Local snapshot</span><p>Rendered {_e(t(d['now']))}</p></div>{_pill('PAPER ONLY · READ-ONLY', 'warn')}<a class="chat-jump" href="#agent-chat">Open chat <span aria-hidden="true">↗</span></a></div></header>
-<div class="workspace"><fieldset class="agent-picker"><legend>Filter by role · changes the view, never trading permissions.</legend>{filters}<main>{status}{crew}{''.join(panels)}</main></fieldset>{chat}</div>
+<div class="workspace"><fieldset class="agent-picker"><legend>Filter by role · changes the view, never trading permissions.</legend>{filters}<main>{status}{crew}{render_desk(desk)}{''.join(panels)}</main></fieldset>{chat}</div>
 <footer>{footer}</footer></div>{scripts}</body></html>'''
 
 
 def build(runtime: Path, output: Path, *, now: datetime | None = None) -> Path:
-    page = render(collect(runtime, now=now or datetime.now(timezone.utc)))
+    now = now or datetime.now(timezone.utc)
+    page = render(collect(runtime, now=now), desk=read_desk(runtime, now=now))
     output.parent.mkdir(parents=True, exist_ok=True)
     name = None
     try:

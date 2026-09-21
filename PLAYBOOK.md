@@ -101,9 +101,21 @@ Pick the **single best** playbook. Write down why in `runtime/decisions.txt`.
 
 ## 2. Phase B — shadow mode (2-4 weeks, RTH only)
 
-Nothing enabled. The system reconciles, scans, evaluates, and refuses every
-idea. You're testing the plumbing against the real API and checking whether
-the ideas look sane.
+Keep unreviewed playbooks disabled. **With control mode DISABLED, the current
+controller reconciles and records an entry-mode skip; it does not scan or
+risk-evaluate entry ideas, and it does not manage exits.** EXITS_ONLY likewise
+skips entry scanning. A disabled loop is a diagnostic, not an end-to-end shadow
+trade test. Agent Desk shows these skipped stages explicitly.
+
+Run a standalone scanner separately to inspect shadow setups (requires working
+realtime options entitlements; replace the date with the completed session):
+
+```powershell
+python -m alpaca_agents.scanner --session YYYY-MM-DD --symbols SPY QQQ IWM
+```
+
+Its report is separate from controller cycle history. Do not interpret its ideas
+as Moon-approved proposals or join it to a cycle merely because the ticker matches.
 
 Each trading morning, ~9:45 ET (let the open settle):
 
@@ -126,12 +138,15 @@ You're looking for:
 - `stages.reconcile.ok: true` every cycle during RTH. If not, the reason
   tells you what the real API disagreed with — report it and we fix the code,
   never the check.
-- `stages.ideas` — would you have taken that trade by hand? Note it.
-- `stages.entries[*].reason` — every idea should say the playbook is not
-  enabled. Anything else is a bug.
+- `stages.entries.skipped` — under DISABLED this should explain the control-mode
+  skip. Missing `stages.scan` is expected, not evidence of no setups.
+- Separately inspect standalone scan errors and shadow ideas. They do not prove
+  that reservation, claim or submission was exercised.
 
-Shadow mode is done when you've had **10 clean sessions** with zero
-reconciliation failures and the ideas look like the playbook you tested.
+Collect **10 clean sessions** of diagnostic and standalone-scan evidence. This
+alone does not establish end-to-end controller readiness. Before Phase C, review
+an explicitly configured no-submission dry run through the permitted entry path.
+Do not change control mode or approvals just to make Agent Desk appear active.
 
 ---
 

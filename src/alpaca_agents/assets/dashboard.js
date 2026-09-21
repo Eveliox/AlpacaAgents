@@ -342,6 +342,8 @@
       : `Snapshot rendered ${Math.floor(elapsed / 60000)} min ago · not live`;
     document.getElementById("chat-snapshot").textContent = text;
   }
+  initializeAgentDesk({state: data.agent_desk, request, live: Boolean(studio), canRead: () => !pending});
+
   // Section links reveal their destination even when a role filter hid it.
   // These are local anchors, not routes or trading controls.
   function navigateSection(hash) {
@@ -350,7 +352,7 @@
     if (!target) return;
     if (target.matches('section[data-agent]')) document.getElementById('agent-all').checked = true;
     const details = target.querySelector(':scope > details');
-    if (details && details.querySelector('summary').textContent === 'Show technical details') details.open = true;
+    if (details && (hash === '#agent-desk' || details.querySelector('summary').textContent === 'Show technical details')) details.open = true;
     document.querySelectorAll('.sidebar nav a').forEach(link => {
       if (link.getAttribute('href') === hash) link.setAttribute('aria-current', 'location');
       else link.removeAttribute('aria-current');

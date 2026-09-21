@@ -463,6 +463,43 @@ use Tab and arrow keys to navigate them with a keyboard. Filtering does not arm
 trading, approve playbooks, or allocate separate budgets. This remains a static
 snapshot: regenerate it for updated data, then refresh the browser.
 
+### Agent Desk (read-only)
+
+Open **Agent Desk** in the sidebar. This is an additive decision-observability
+module, not a new set of autonomous agents. Six cards expose Star's setups,
+research/prior limitations, option-edge limitations, Moon's reservation risk
+verdicts, Houston's entry records and Houston's exit records.
+
+- Select a saved controller cycle; click a card or activity item for its evidence.
+  The flow shows the actual order: reconcile → existing exits → entry-mode gate
+  → scan/candidate gates → reserve and optional claim/submission.
+- Entry economics are shown only when an exact controller decision-key match
+  exists in the local order journal. The original verdict/submission and the
+  journal status **at the latest read** are separate. No ticker/time proximity
+  joins, no inferred realized P&L, and a submitted order is not a verified fill.
+- Prior calibration, option-level edge, Kelly sizing, confidence, latency and
+  frozen market-input snapshots are not invented. Research stays separate.
+- Served mode polls every 15 seconds **while the desk is open**, through the
+  existing authenticated worker. Reads can wait behind controller work. Selecting
+  history pins that cycle; **Follow latest** resumes following. A retained cycle
+  outside the current window is labeled and does not receive refreshed journal
+  status. Disconnects retain evidence with an explicit unknown-current-state
+  warning; use Refresh records to retry a read.
+- Static mode is offline. With JavaScript disabled, the latest-cycle evidence is
+  still readable, but switching cycles needs JavaScript. No approval, run-cycle,
+  cancellation or submission buttons/routes are added.
+- History is bounded to 20 records from the last 512 KiB of `cycles.jsonl`, at
+  most 12 entry/exit/refusal rows per cycle. Incomplete, malformed, duplicate-ID
+  or oversized records are omitted with warnings. This is not a full audit export.
+
+Read-only endpoints (same token/Host/Origin protections as studio):
+`GET /api/agent-desk/state[?after=<revision cursor>]`,
+`GET /api/agent-desk/cycles`, and `GET /api/agent-desk/cycles/<id>`.
+The cursor is a content revision, not a live event-stream offset. Unknown or
+out-of-window detail IDs return 404. No new market-data, LLM or broker calls.
+
+See `docs/PLAN-agent-desk.md` for scope and the deferred event-capture phase.
+
 ### Talk to your crew
 
 #### Live local records (milestone 1)
@@ -630,6 +667,9 @@ node tests/dashboard_browser.cjs
 node tests/dashboard_browser.cjs --served
 # Generative UI with a scripted fake model (no API key / provider requests):
 node tests/dashboard_browser.cjs --generative
+# Agent Desk with a synthetic journal; no broker/provider requests:
+node tests/agent_desk_browser.cjs
+node tests/agent_desk_browser.cjs --static
 ```
 
 The browser smoke test uses an isolated temporary profile and checks avatars,

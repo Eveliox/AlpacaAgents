@@ -15,6 +15,23 @@ def main():
         'summary': {'trend': {'resolved': 37, 'expectancy_r': 0.25, 'median_r': 0.19,
                               'profit_factor': 1.53, 'max_loss_r': -1.8, 'no_trade': 1}}
     }), encoding='utf-8')
+    if '--agent-desk' in sys.argv:
+        from decimal import Decimal
+        from alpaca_agents.dashboard import build
+        from alpaca_agents.executor.orders import OrderJournal
+        from alpaca_agents.rules import RiskState
+        from tests.test_agent_desk import CID, SECOND, NOW, cycle
+        (rt / 'trading-control').write_text('ARMED_PAPER', encoding='utf-8')
+        journal = OrderJournal(rt / 'orders.sqlite3', account_id='private-fixture-account', control_file=rt / 'trading-control')
+        idea = json.loads((Path(__file__).parents[1] / 'examples/long_call.json').read_text())
+        idea.update(playbook='trend_directional', thesis='<img src=x onerror=globalThis.injected=true> api_key=PRIVATEKEY')
+        journal.reserve(f'entry-{CID}-IWM-trend_directional', idea,
+                        state_provider=lambda: RiskState(NOW.date(), NOW, 0, 0, Decimal(0), Decimal(2000), (), reconciled=True),
+                        now=NOW, trading_day=NOW.date())
+        latest = cycle(SECOND, 'DISABLED')
+        latest['stages'] = {'reconcile': {'ok': False, 'reasons': ['MARKET_CLOSED']}, 'halt': {'reason': 'unreconciled'}}
+        (rt / 'cycles.jsonl').write_text(json.dumps(cycle()) + '\n' + json.dumps(latest) + '\n', encoding='utf-8')
+        build(rt, rt / 'dashboard.html', now=NOW)
     llm = None
     if '--generative' in sys.argv:
         from alpaca_agents.llm_chat import LLMChat
