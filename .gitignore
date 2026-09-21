@@ -9,3 +9,6 @@ build/
 dist/
 .pytest_cache/
 runtime/
+
+# Root copies of docs/user-guides/*.pdf; the committed ones live there
+/*.pdf
