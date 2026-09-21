@@ -65,11 +65,11 @@ class IntradayTests(unittest.TestCase):
             intraday.evaluate(raw, symbol='QQQ', now=NOW)
 
     def test_malformed_missing_duplicate_gaps_stale_and_foreign_bars_fail_closed(self):
-        for kind in ('nan', 'bool', 'missing_vwap', 'zero_volume', 'duplicate', 'gap', 'opening', 'stale', 'symbol', 'adjusted', 'paging', 'unordered', 'ohlc'):
+        for kind in ('nan', 'bool', 'missing_close', 'zero_volume', 'duplicate', 'gap', 'opening', 'stale', 'symbol', 'adjusted', 'paging', 'unordered', 'ohlc'):
             raw = minutes()
             if kind == 'nan': raw['results'][5]['c'] = float('nan')
             if kind == 'bool': raw['results'][5]['v'] = True
-            if kind == 'missing_vwap': del raw['results'][5]['vw']
+            if kind == 'missing_close': del raw['results'][5]['c']
             if kind == 'zero_volume': raw['results'][5]['v'] = 0
             if kind == 'duplicate': raw['results'][5] = raw['results'][4]
             if kind == 'gap': del raw['results'][5]
@@ -82,6 +82,21 @@ class IntradayTests(unittest.TestCase):
             if kind == 'ohlc': raw['results'][5]['h'] = 99
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 intraday.evaluate(raw, symbol='QQQ', now=NOW)
+
+    def test_provider_vwap_is_ignored_and_bar_age_tolerates_feed_lag(self):
+        # Live feed put a late block print in the wrong minute (vw 1.8% below the bar's low).
+        # Session VWAP must come from hlc3 x volume so one such bar cannot fabricate a reclaim.
+        raw = minutes()
+        expected = intraday.evaluate(raw, symbol='QQQ', now=NOW)
+        raw['results'][10]['vw'] = raw['results'][10]['l'] * 0.982
+        self.assertEqual(intraday.evaluate(raw, symbol='QQQ', now=NOW), expected)
+        for r in raw['results']:
+            del r['vw']
+        self.assertEqual(intraday.evaluate(raw, symbol='QQQ', now=NOW), expected)
+        raw = minutes()
+        self.assertEqual(intraday.evaluate(raw, symbol='QQQ', now=NOW + timedelta(seconds=110))['status'], 'setup')
+        with self.assertRaises(ValueError):
+            intraday.evaluate(raw, symbol='QQQ', now=NOW + timedelta(seconds=125))
 
     def test_volume_liquidity_and_noise_gates(self):
         raw = minutes(); raw['results'][-1]['v'] = 20000

@@ -12,6 +12,13 @@ from alpaca_agents.executor.eastern import to_eastern
 from .indicators import atr, ema
 
 
+MAX_BAR_AGE = timedelta(seconds=120)   # last completed bar must have ended within this; feed lag is seconds
+# Session VWAP is computed from (high+low+close)/3 x volume, the standard chart approximation.
+# The provider's per-bar `vw` is NOT used: on live data it includes late-reported block prints
+# assigned to the wrong minute (QQQ 2026-09-21 10:33: vw 721.8 against a bar low of 735.1,
+# 1.46M shares), which would drag the session VWAP by dollars and fabricate reclaim signals.
+
+
 @dataclass(frozen=True)
 class MinuteBar:
     at: datetime  # interval START
@@ -20,7 +27,10 @@ class MinuteBar:
     low: float
     close: float
     volume: float
-    vwap: float  # provider's volume-weighted price within the interval
+
+    @property
+    def typical(self) -> float:
+        return (self.high + self.low + self.close) / 3
 
 
 def research_window(now):
@@ -49,19 +59,19 @@ def completed_bars(payload, *, symbol, now):
         previous = at
         if not opening <= at < closing or at + timedelta(minutes=1) > now:
             continue  # explicitly exclude extended hours and the forming candle
-        values = [row.get(k) for k in ('o', 'h', 'l', 'c', 'v', 'vw')]
+        values = [row.get(k) for k in ('o', 'h', 'l', 'c', 'v')]
         if any(type(v) not in (int, float) or not math.isfinite(v) or abs(v) > 1e12 for v in values):
             raise ValueError('Missing or nonfinite intraday fields')
-        o, h, l, c, v, vw = values
-        if not (0 < l <= min(o, c) <= max(o, c) <= h and v > 0 and l <= vw <= h):
-            raise ValueError('Invalid OHLCV/VWAP')
+        o, h, l, c, v = values
+        if not (0 < l <= min(o, c) <= max(o, c) <= h and v > 0):
+            raise ValueError('Invalid OHLCV')
         if at != (bars[-1].at + timedelta(minutes=1) if bars else opening):
             raise ValueError('Incomplete regular session; VWAP is unknown')
         bars.append(MinuteBar(at, *values))
     if len(bars) < 22:
         raise ValueError('Need 22 completed regular-session minutes')
     age = now - (bars[-1].at + timedelta(minutes=1))
-    if not timedelta(0) <= age <= timedelta(seconds=90):
+    if not timedelta(0) <= age <= MAX_BAR_AGE:
         raise ValueError('Stale minute bars')
     return tuple(bars)
 
@@ -74,8 +84,8 @@ def evaluate(payload, *, symbol, now):
     closes = [b.close for b in bars]
     last, prev = bars[-1], bars[-2]
     volume = sum(b.volume for b in bars)
-    vwap = sum(b.vwap * b.volume for b in bars) / volume
-    prior_vwap = sum(b.vwap * b.volume for b in bars[:-1]) / (volume - last.volume)
+    vwap = sum(b.typical * b.volume for b in bars) / volume
+    prior_vwap = sum(b.typical * b.volume for b in bars[:-1]) / (volume - last.volume)
     fast, slow = ema(closes, 9), ema(closes, 21)
     average_volume = sum(b.volume for b in bars[-21:-1]) / 20
     relative_volume = last.volume / average_volume

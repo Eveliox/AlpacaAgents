@@ -33,8 +33,14 @@ It never deletes the controller lock. Invalid/unknown profiles are refused.
 ### Scalp hypotheses (unvalidated starting parameters, not universal standards)
 
 - One-minute underlying bars, **completed only**, regular session from 09:30 ET.
-  Full contiguous session required for volume-weighted session VWAP; do not
-  interpolate missing minutes or substitute typical-price VWAP.
+  Full contiguous session required for session VWAP; do not interpolate missing
+  minutes. **Session VWAP is (high+low+close)/3 × volume** — the standard chart
+  approximation. An earlier version of this doc said not to substitute it for the
+  provider's per-bar `vw`; the first live session (2026-09-21) showed why that
+  was wrong: Massive's `vw` includes late-reported block prints assigned to the
+  wrong minute (QQQ 10:33, 1.46M shares at 721.8 against a bar low of 735.1).
+  One such bar moves the session VWAP by dollars and fabricates reclaim signals.
+  The provider `vw` is now ignored entirely.
 - Need 22 completed minutes for EMA9/21 and the preceding 20-minute volume mean.
   Latest completed bar ends no more than 90 seconds before evaluation. Reject
   future, duplicate, unordered, nonfinite, malformed, incomplete or stale bars.
