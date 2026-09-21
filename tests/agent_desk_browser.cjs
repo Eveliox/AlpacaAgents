@@ -51,6 +51,11 @@ const pause = ms => new Promise(r => setTimeout(r, ms));
     await send('Page.navigate',{url});
     for(let n=0;n<100;n++){if(await evaluate("!!document.getElementById('desk-cycle') && !document.getElementById('desk-cycle').disabled"))break;await pause(100);}
     assert.equal(await evaluate("document.querySelectorAll('[data-desk-agent]').length"),6);
+    // Research style selector changes only the evidence view, never the running trading style.
+    assert(await evaluate("!document.querySelector('[data-research-profile=scalp]').hidden"));
+    await evaluate("document.getElementById('research-profile').value='swing';document.getElementById('research-profile').dispatchEvent(new Event('change'))");
+    assert(await evaluate("document.querySelector('[data-research-profile=scalp]').hidden && !document.querySelector('[data-research-profile=swing]').hidden"));
+    assert.match(await evaluate("document.getElementById('scalp-swing-research').textContent"), /NOT an options proposal/);
     await evaluate("document.getElementById('agent-moon').click();document.querySelector('.sidebar a[href=\"#agent-desk\"]').click()");
     await pause(120); await settle();
     assert(await evaluate("document.getElementById('desk-panel').open"));
@@ -135,6 +140,7 @@ const pause = ms => new Promise(r => setTimeout(r, ms));
     assert.match(await evaluate("document.getElementById('desk-evidence').textContent"),/MARKET_CLOSED/);
     assert.equal(await evaluate("document.querySelector('.desk-flow li').dataset.tone"),'stop','no-JS page still colours the recorded path');
     assert(await evaluate("document.getElementById('desk-cycle').disabled"));
+    assert(await evaluate("document.getElementById('research-profile').disabled && [...document.querySelectorAll('[data-research-profile]')].every(n=>!n.hidden)"));
     assert.equal(await evaluate("document.getElementById('desk-cycle').value"), (offline ? 'b' : 'c').repeat(32));
     assert.deepEqual(errors,[]);
     if(offline)assert.deepEqual(requests,[]);

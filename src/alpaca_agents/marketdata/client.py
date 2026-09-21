@@ -70,7 +70,7 @@ class MarketDataClient:
 
     def _get(self, path: str, query: dict) -> dict:
         if not (re.fullmatch(r"/v3/snapshot/options/[A-Z]{1,6}(/O:[A-Z]{1,6}[0-9]{6}[CP][0-9]{8})?", path)
-                or re.fullmatch(r"/v2/aggs/ticker/[A-Z]{1,6}/range/1/day/\d{4}-\d{2}-\d{2}/\d{4}-\d{2}-\d{2}", path)
+                or re.fullmatch(r"/v2/aggs/ticker/[A-Z]{1,6}/range/1/(day|minute)/\d{4}-\d{2}-\d{2}/\d{4}-\d{2}-\d{2}", path)
                 or re.fullmatch(r"/v2/snapshot/locale/us/markets/stocks/tickers/[A-Z]{1,6}", path)
                 or path == "/v2/reference/news"):
             raise MarketDataError("Market-data endpoint not allowed")
@@ -134,6 +134,17 @@ class MarketDataClient:
             # This bounded daily request should fit in one page. Never pretend
             # a truncated series is a complete indicator history.
             raise MarketDataError("Unexpected paginated daily bars; history incomplete")
+        return payload
+
+    def minute_bars(self, symbol: str, *, session: date) -> dict:
+        """One bounded session of underlying bars; research only, not option quotes."""
+        symbol_checked(symbol)
+        if type(session) is not date:
+            raise MarketDataError("Session date required")
+        payload = self._get(f"/v2/aggs/ticker/{symbol}/range/1/minute/{session}/{session}",
+                            {"adjusted": "true", "sort": "asc", "limit": "5000"})
+        if payload.get("next_url"):
+            raise MarketDataError("Unexpected paginated minute bars; session incomplete")
         return payload
 
     def stock_snapshot(self, symbol: str) -> dict:

@@ -18,6 +18,7 @@ Repo: https://github.com/Eveliox/AlpacaAgents
 | 2 Rules | `rules.py` | **Moon** | Pure, deterministic. $100 max risk incl. fees, 2 positions, $40 daily loss breaker, cash semantics, fail-closed. No I/O, no LLM. |
 | 3 Executor | `executor/` | **Houston** | Only broker boundary. Paper URL hardcoded. Journal with reserve→claim→submit, single-use auth, stored bodies. Reconciliation with real checks. Exit manager. Manual `release-intent` / `flatten`. |
 | 4 Dashboard | `dashboard*.py`, `assets/` | **Astra** | Compact dark/plum layout, sidebar navigation, status-first cards and mean/median R comparison plots. Agent avatars (owner's artwork) as small shortcuts. Offline rule-based chat (NOT an LLM); optional served generative chat. CSP, no external assets, no trading controls. |
+| Scalp/swing research | `research_scan.py`, `scanner/intraday.py` | Star | Separate recurring underlying-only watchlist scanner; `--style scalp/swing`, completed minute/daily bars, saved profile selector. No scalp orders or trading-mode switch. See `docs/PLAN-scalp-swing.md`. |
 | Agent Desk | `agent_desk.py`, `agent_desk_view.py`, `assets/agent_desk.js` | — | Read-only cycle browser, six functional views, actual stage flow, proposal/risk inspection. Exact decision-key journal links; historical verdicts separated from current journal status. 20-record bounded history; served polling, not live stage events. No new models or order/approval paths. |
 | Orchestration | `controller.py` | — | One cycle or `--every N` loop. Runtime lock (one controller per dir). Never submits without `--submit`. |
 | Generative agents | `llm_chat.py` | four + **Nova** (general assistant, generative-only, default) | Optional. Anthropic Messages API via stdlib HTTPS. Tools: read_snapshot/read_backtest/read_cycles/explain_rule, plus read_market/read_news through the allowlisted Massive client when its key is loaded. Falls back to the rule router. Off without `ANTHROPIC_API_KEY`. |
@@ -30,17 +31,17 @@ Support: `calendar.py` (NYSE sessions/holidays), `gateway.py` (control modes), `
 
 - **Alpaca paper account**: ACTIVE, options level 3, `multiplier=4` (margin — all paper accounts are), `pattern_day_trader=true`, $100k balance (owner did not create it at $2k; `capital_cap` bounds spendable cash to $2,000 regardless).
 - `runtime/paper-margin-acknowledged` contains `ACKNOWLEDGED` (required for reconciliation to pass on a margin paper account).
-- **Massive/Polygon subscription: Stocks Advanced.** Stock bars work (200). **Options snapshots return HTTP 403.** The scanner and the exit bid-pricing need **Options Advanced** ($199/mo). Owner said they'll upgrade later. Until then: backtests work, shadow scan fails with 3 snapshot errors, live trading is impossible.
+- **Massive Options Advanced upgraded by owner (2026-09-21).** After saving the new key, stock and option endpoints returned 200; the standalone scan recorded zero snapshot errors and no qualifying ideas for the previous session. Benzinga earnings returned 403; future earnings dates remain unavailable. These are historical checks, not current service guarantees.
 - Reconciliation verified live: `reconciled: true` during RTH, only `MARKET_CLOSED` after hours.
-- **Keys were pasted into chat by the owner (Alpaca key/secret and Massive key). They must be rotated.** Remind the owner. Keys live in `C:\Users\eveli\keys.ps1` (outside repo); load with `. C:\Users\eveli\keys.ps1`. Env vars: `ALPACA_PAPER_API_KEY`, `ALPACA_PAPER_API_SECRET`, `MASSIVE_API_KEY` (or `POLYGON_API_KEY`).
+- **Earlier keys were exposed in chat.** Owner reported replacing Massive and rotating Alpaca paper credentials on 2026-09-21; account authentication subsequently worked. Never print keys or key fragments; don't infer old-key revocation just from successful new-key authentication. Keys live in `C:\Users\eveli\keys.ps1` (outside repo); load with `. C:\Users\eveli\keys.ps1`. Env vars: `ALPACA_PAPER_API_KEY`, `ALPACA_PAPER_API_SECRET`, `MASSIVE_API_KEY` (or `POLYGON_API_KEY`).
 - `runtime/` is gitignored except nothing — it holds SQLite journals, bars caches (`bars-SPY/QQQ/IWM.json`), backtest reports (`bt-*.json`), `dashboard.html`. Do not commit it. Do not edit the SQLite files by hand.
 
 ## 3. Runtime files and switches
 
 | File | Meaning |
 |---|---|
-| `runtime/trading-control` | exactly `ARMED_PAPER` / `EXITS_ONLY` / `DISABLED` (missing/garbled = DISABLED). Currently DISABLED. |
-| `runtime/playbooks/<name>.approved` | exactly `APPROVED`. None exist yet. Controller also needs `--enable-playbook <name>`. |
+| `runtime/trading-control` | exactly `ARMED_PAPER` / `EXITS_ONLY` / `DISABLED` (missing/garbled = DISABLED). Owner explicitly authorized ARMED_PAPER for QQQ trend on 2026-09-21. Inspect the current file/process, not this historical note. |
+| `runtime/playbooks/<name>.approved` | exactly `APPROVED`. `trend_directional` authorized for QQQ on 2026-09-21; launch must retain `--symbols QQQ` (marker itself is not symbol-scoped). Controller also needs `--enable-playbook <name>`. No scalp or single-stock execution approval. |
 | `runtime/paper-margin-acknowledged` | exactly `ACKNOWLEDGED`. Exists. |
 | `--submit` | CLI flag; the only way orders are POSTed. |
 
@@ -65,7 +66,7 @@ Audited (Jan 2023–Sep 2026, 929 bars):
 | bounce (all) | negative or tiny samples (2–9 trades): stop design is structurally flawed (swing low is usually today's low) |
 | breakout | 1 trade per symbol: no conclusion |
 
-Only QQQ trend is a candidate, and it is thin. Nothing is approved. The earlier
+Only QQQ trend is a candidate, and it is thin. Owner later approved QQQ trend for paper execution (2026-09-21); this does not strengthen the backtest evidence. The earlier
 "+0.63R / $63 per $100" figure was wrong and has been retracted in docs.
 
 ## 5. Exit rules (executor/exits.py) — current behaviour
@@ -114,6 +115,12 @@ CI: `.github/workflows/tests.yml` runs Python 3.11–3.13 + Node tests.
 - Tests are the spec. Add tests for behaviour changes; the full-lifecycle controller test (`tests/test_controller.py`) runs against a stateful fake broker and has caught 4 real bugs.
 
 ## 8. Known gaps (honest list)
+
+- Scalp/swing research is underlying-only, not a second execution strategy.
+  Continuous research and a saved-profile selector exist; scalp option selection,
+  same-day target/time exits, earnings verification, execution replay and safe
+  trading-profile switching do not. The current protective-only same-day policy
+  and local day-trade budget remain enforced. See `docs/PLAN-scalp-swing.md`.
 
 - Agent Desk Phase A is read-only observability (`docs/PLAN-agent-desk.md`). Cycles
   contain completed summaries, not live stage events or frozen market inputs.

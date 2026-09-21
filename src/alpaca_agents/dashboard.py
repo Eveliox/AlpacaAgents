@@ -19,6 +19,7 @@ from .agent_desk_view import CSS as DESK_CSS, empty_state, render_desk
 from .executor.eastern import eastern_date
 from .gateway import control_mode
 from .scanner.scan import PLAYBOOKS
+from .research_scan import read_reports
 
 AGENTS = (
     ("houston", "Houston", "Executor", "Checks broker records, sends approved paper orders and manages exits."),
@@ -220,6 +221,7 @@ def collect(runtime: Path, *, now: datetime) -> dict:
             "latched": latched, "inventory": inventory, "closed": closed, "intents": intents, "live": live,
             "order_events": events, "cycles": cycles, "notifications": notifications, "shadow": shadow,
             "shadow_counts": shadow_counts, "traces": traces, "research": research, "issues": issues,
+            "research_scans": read_reports(runtime),
             "ledger_known": not any(i.startswith(fills_db.name + ":") for i in issues),
             "orders_known": not any(i.startswith(orders_db.name + ":") for i in issues)}
 
@@ -378,6 +380,29 @@ def render(d: dict, *, studio=None, desk=None) -> str:
     ideas = _table(["Symbol", "Playbook", "Thesis"], [(r.get("symbol"), r.get("playbook"), r.get("thesis")) for r in _records(shadow.get("shadow"))], empty="No shadow ideas recorded. Check errors and report age before interpreting this as no setups.")
     scan_body = (f'<p>{_pill(scan_age, scan_cls)} <span class="dim small">{_e(t(shadow.get("generated_at")))}</span></p>' + errors + ideas) if shadow else _empty("Run a shadow scan with realtime options access. Stocks Advanced supports stock research, not realtime option selection.")
     panels.append(_panel("star", "Scan health & ideas", scan_body))
+    profiles = []
+    for style in ('scalp', 'swing'):
+        report = d.get('research_scans', {}).get(style)
+        body = _empty('No readable research report. This does not start scanning or change trading mode.')
+        if report:
+            age, cls = _age(report.get('generated_at'), d['now'], seconds=120 if style == 'scalp' else 86400)
+            records = _records(report.get('rows'))
+            records = sorted(records, key=lambda r: r.get('status') != 'setup')
+            body = (f'<p>{_pill(age, cls)} {_e(report.get("generated_at"))} · '
+                    f'{_e(report.get("status"))} · observed {_e(report.get("observed"))}/{_e(report.get("requested"))}</p>'
+                    '<p class="dim small">Latest pass, not a live feed. Each row has its own observation time. Showing up to 30 rows; setups first.</p>' +
+                    _table(['Underlying', 'Observed / bar', 'Result', 'Technique / bias', 'Underlying entry / stop / projected target', 'Reason'],
+                           [(r.get('symbol'), f'{r.get("observed_at")} / {r.get("bar_at")}', r.get('status'),
+                             f'{r.get("technique")} / {r.get("direction")}',
+                             f'{r.get("entry")} / {r.get("stop")} / {r.get("target")}', r.get('reason')) for r in records[:30]],
+                           empty='No observations in this report; setups unknown.'))
+        profiles.append(f'<div data-research-profile="{style}"><h3>{style.title()} research</h3>{body}</div>')
+    research_body = ('<label for="research-profile">Research view only <select id="research-profile" disabled>'
+                     '<option value="scalp">Scalp</option><option value="swing">Swing</option></select></label>'
+                     '<p class="notice">Underlying research only — NOT an options proposal or a trading-mode switch. '
+                     'No contracts selected, no option liquidity checks, no new order path. Stocks require verified earnings and instrument data. '
+                     'Scalp execution and same-day exit policy are not implemented. Refresh the page to load new reports.</p>' + ''.join(profiles))
+    panels.append(_panel('star', 'Scalp & swing research', research_body, wide=True))
 
     closed = _table(["Day", "Contract", "Booked fill P&L"],
                     [(r["trading_day"], r["contract"], Html(f'<span class="{"ok" if r["pnl_units"] >= 0 else "bad"}">${Decimal(r["pnl_units"]) / 1_000_000:.2f}</span>')) for r in d["closed"]], numeric={2},
@@ -440,6 +465,7 @@ def render(d: dict, *, studio=None, desk=None) -> str:
 <a href="#open-positions"><span aria-hidden="true">▤</span>Positions</a>
 <a href="#research-lab"><span aria-hidden="true">↗</span>Research</a>
 <a href="#scan-health-ideas"><span aria-hidden="true">⌕</span>Scanner</a>
+<a href="#scalp-swing-research"><span aria-hidden="true">≋</span>Scan profiles</a>
 <a href="#risk-checks"><span aria-hidden="true">◇</span>Risk &amp; limits</a>
 <a href="#cycles"><span aria-hidden="true">≡</span>Activity</a>
 <a href="#agent-chat"><span aria-hidden="true">◌</span>Chat</a>

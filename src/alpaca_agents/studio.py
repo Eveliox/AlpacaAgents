@@ -65,6 +65,8 @@ def display_snapshot(raw):
     for name, keys in {"errors": "symbol reason", "shadow": "symbol playbook thesis"}.items():
         if isinstance(shadow.get(name), list):
             d["shadow"][name] = [_pick(r, keys) for r in shadow[name] if isinstance(r, dict)]
+    # read_reports() is a bounded fixed-field projection, not raw provider records.
+    d['research_scans'] = raw.get('research_scans', {})
     d["research"] = []
     for r in raw["research"]:
         item = _pick(r, "symbol file first_bar last_bar generated_at options_pnl_modelled level")

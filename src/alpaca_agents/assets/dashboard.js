@@ -343,6 +343,16 @@
     document.getElementById("chat-snapshot").textContent = text;
   }
   initializeAgentDesk({state: data.agent_desk, request, live: Boolean(studio), canRead: () => !pending});
+  // Local evidence filter only: no request, controller mutation or position-policy switch.
+  const researchProfile = document.getElementById('research-profile');
+  if (researchProfile) {
+    const showProfile = () => document.querySelectorAll('[data-research-profile]').forEach(view => {
+      view.hidden = view.dataset.researchProfile !== researchProfile.value;
+    });
+    researchProfile.disabled = false;
+    researchProfile.addEventListener('change', showProfile);
+    showProfile();
+  }
 
   // Section links reveal their destination even when a role filter hid it.
   // These are local anchors, not routes or trading controls.

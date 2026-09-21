@@ -463,6 +463,38 @@ use Tab and arrow keys to navigate them with a keyboard. Filtering does not arm
 trading, approve playbooks, or allocate separate budgets. This remains a static
 snapshot: regenerate it for updated data, then refresh the browser.
 
+### Recurring scalp / swing research (no orders)
+
+The new **Scan profiles** panel switches between saved scalp and swing research.
+It is a view selector, **not an automated trading-mode switch**. Scalp trading is
+not implemented; the armed QQQ swing controller and its exit rules are unchanged.
+
+In a separate PowerShell window (leave the position manager running):
+
+```powershell
+. C:\Users\eveli\keys.ps1
+python -m alpaca_agents.research_scan --style scalp --symbols SPY QQQ IWM AAPL MSFT --every 15
+# Or stop this research process with Ctrl+C and switch the research profile:
+python -m alpaca_agents.research_scan --style swing --symbols SPY QQQ IWM AAPL MSFT --every 300
+```
+
+Scalp hypotheses use completed one-minute bars: session VWAP, EMA9/21 alignment,
+15-minute opening-range breakout / VWAP reclaim, volume and ATR-stop checks.
+Swing uses the existing completed-daily-bar trend hypothesis. These parameters
+are not proven edges. Reports contain underlying levels, **no option contracts,
+no option P&L and no executable ideas**. Earnings remain unverified for stocks.
+
+An optional `--watchlist path.json` replaces `--symbols`; use a JSON array of
+1–505 explicit uppercase alphabetic symbols. This is not a maintained S&P 500
+membership list. Scans are sequential and intervals run after each pass; large
+lists are not simultaneous live quotes. Three consecutive data errors stop the
+loop; don't mistake an incomplete/error report for no setups.
+
+Reports/locks are isolated in `runtime/research-scans/`. No controller lock,
+control, approvals or journal is changed. Refresh the dashboard page to load new
+reports; each observation has a timestamp. See `docs/PLAN-scalp-swing.md` for
+exact hypotheses, missing execution features and required safety decisions.
+
 ### Agent Desk (read-only)
 
 Open **Agent Desk** in the sidebar. This is an additive decision-observability
