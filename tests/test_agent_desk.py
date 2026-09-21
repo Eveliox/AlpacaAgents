@@ -77,11 +77,23 @@ class AgentDeskTests(unittest.TestCase):
             c = cycle(mode=mode)
             del c['stages']['scan']
             c['stages']['entries'] = {'skipped': f'control mode {mode}'}
+            c['stages']['reconcile']['open_positions'] = 1
             r = project_cycle(c, cycle_id=CID)
             self.assertEqual(r['status'], 'skipped')
             self.assertEqual(r['agents'][0]['status'], 'skipped')
             self.assertEqual(r['agents'][3]['status'], 'skipped')
-            self.assertIn('does not prove', r['agents'][5]['summary'])
+            if mode == 'DISABLED':
+                self.assertEqual(r['agents'][5]['status'], 'skipped')
+                self.assertIn('not managed', r['agents'][5]['summary'])
+            else:  # EXITS_ONLY with a position but no exit rows: the record cannot prove evaluation happened
+                self.assertEqual(r['agents'][5]['status'], 'unknown')
+                self.assertIn('does not prove', r['agents'][5]['summary'])
+        # No positions at reconcile: the exit stage ran with nothing to evaluate. That is a pass, not unknown.
+        r = project_cycle(cycle(), cycle_id=CID)
+        self.assertEqual(r['agents'][5]['status'], 'recorded')
+        self.assertIn('nothing to evaluate', r['agents'][5]['summary'])
+        missing = cycle(); del missing['stages']['exits']
+        self.assertEqual(project_cycle(missing, cycle_id=CID)['agents'][5]['status'], 'unknown')
         c['stages'] = {'reconcile': {'ok': False, 'reasons': ['POSITION_MISMATCH']}, 'halt': {'reason': 'unreconciled'}}
         r = project_cycle(c, cycle_id=CID)
         self.assertEqual(r['status'], 'halted')

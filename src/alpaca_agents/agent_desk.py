@@ -204,7 +204,19 @@ def project_cycle(raw, *, cycle_id, db=None):
                           or r['submission']['outcome'] == 'unplaced' for r in entries) else
         'dry_run' if entries and raw.get('submit') is False and any(r['risk_pass_at_reservation'] is True for r in entries) else
         'recorded' if entries else 'skipped' if skipped or blocked else 'error' if error else 'unknown')
-    exit_state = 'recorded' if exits else 'skipped' if blocked or mode == 'DISABLED' else 'unknown'
+    # The controller writes stages.exits (possibly []) after reconcile passes, but only evaluates exits
+    # when there is inventory and the mode permits. Distinguish 'nothing to evaluate' from 'not evaluated'.
+    exits_present = isinstance(s.get('exits'), list)
+    if exits:
+        exit_state, exit_note = 'recorded', 'Exit evaluations precede scanning. No entry linkage or realized P&L is inferred from a matching contract.'
+    elif blocked:
+        exit_state, exit_note = 'skipped', 'Cycle halted before exit evaluation.'
+    elif exits_present and reconcile['open_positions'] == 0:
+        exit_state, exit_note = 'recorded', 'Exit stage ran: no open option positions at this cycle, so nothing to evaluate.'
+    elif exits_present and mode == 'DISABLED':
+        exit_state, exit_note = 'skipped', 'DISABLED does not evaluate automatic exits; open positions were not managed this cycle.'
+    else:
+        exit_state, exit_note = 'unknown', 'No exit evaluations recorded; this does not prove there were no positions.'
     specs = {
         'spotter': (scan_state, scan_note, 'cycles.jsonl · stages.scan', scan_view),
         'prior': ('not_implemented', 'No calibrated prior. Saved research can be reviewed separately; it was not linked to this cycle.', None,
@@ -215,8 +227,7 @@ def project_cycle(raw, *, cycle_id, db=None):
                  'cycles.jsonl · stages.reconcile / stages.entries', {"cycle_reconciliation": reconcile, "entry_verdicts": entries}),
         'entry': (entry_state, skipped or error or 'Recorded entry attempts. Acknowledged submission is not a verified fill. Unknown outcomes require reconciliation, never retry.',
                   'cycles.jsonl · stages.entries', {"entries": entries, "skip_reason": skipped, "error": error}),
-        'exit': (exit_state, 'Exit evaluations precede scanning. No entry linkage or realized P&L is inferred from a matching contract.' if exits else
-                 'No exit evaluations recorded; this does not prove there were no positions.', 'cycles.jsonl · stages.exits', {"exits": exits}),
+        'exit': (exit_state, exit_note, 'cycles.jsonl · stages.exits', {"exits": exits, "open_positions_at_reconcile": reconcile['open_positions']}),
     }
     agents = [{"id": key, "name": name, "role": role, "status": specs[key][0], "summary": specs[key][1],
                "source": specs[key][2], "outputs": specs[key][3], "confidence": None, "latency_ms": None,

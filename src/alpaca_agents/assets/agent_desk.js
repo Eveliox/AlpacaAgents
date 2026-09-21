@@ -9,8 +9,18 @@ function initializeAgentDesk({state, request, live, canRead}) {
   const connection = document.getElementById('desk-connection');
   const inspector = document.getElementById('desk-inspector');
   const cards = [...document.querySelectorAll('[data-desk-agent]')];
+  const replayButton = document.getElementById('desk-replay');
+  const swarm = document.querySelector('.desk-swarm');
+  const core = document.querySelector('.desk-core');
+  const links = [...document.querySelectorAll('.desk-connectors path')];
   let following = true, selected = state.cycles[0] || null, role = 'spotter';
-  let reading = false, disconnected = false;
+  let reading = false, disconnected = false, replayToken = 0;
+  // Mirror of TONES in agent_desk_view.py. Unknown statuses are amber, never green.
+  const TONES = {passed_at_cycle: 'pass', recorded: 'pass', risk_pass: 'pass', submission_recorded: 'pass',
+                 dry_run: 'pass', ARMED_PAPER: 'pass', EXITS_ONLY: 'warn',
+                 blocked: 'stop', rejected: 'stop', error: 'stop', uncertain: 'stop', halted: 'stop'};
+  const tone = status => TONES[status] || 'warn';
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   const node = (tag, text, cls) => {
     const element = document.createElement(tag);
     if (text !== undefined) element.textContent = text;
@@ -114,16 +124,21 @@ function initializeAgentDesk({state, request, live, canRead}) {
     const flow = document.querySelector('.desk-flow');
     flow.replaceChildren();
     if (selected) selected.flow.forEach(step => {
-      const li = node('li'); li.append(node('strong', step.name), node('span', human(step.status))); flow.append(li);
+      const li = node('li'); li.dataset.tone = tone(step.status);
+      li.append(node('strong', step.name), node('span', human(step.status))); flow.append(li);
     });
     else flow.append(node('li', 'No recorded flow. Unknown is not idle.'));
     cards.forEach(card => {
       const agent = selected && selected.agents.find(a => a.id === card.dataset.deskAgent);
       card.disabled = !agent;
       card.dataset.status = agent ? agent.status : 'unknown';
+      card.dataset.tone = tone(card.dataset.status);
       card.querySelector('.desk-state').textContent = agent ? human(agent.status) : 'Unknown';
     });
+    core.dataset.tone = selected ? tone(selected.status) : 'warn';
     document.querySelector('.desk-core strong').textContent = selected ? human(selected.status) : 'Unknown';
+    replayButton.disabled = !selected;
+    replay();
     inspect(selected && selected.agents.find(a => a.id === role));
     drawProposals(); drawActivity();
     document.getElementById('desk-evidence').textContent = selected ? JSON.stringify(selected, null, 2) : 'No saved cycle. This page does not start one.';
@@ -132,6 +147,44 @@ function initializeAgentDesk({state, request, live, canRead}) {
     if (selected && selected.details_truncated) warnings.append(node('li', 'Cycle details exceed the display bound; additional rows are omitted.'));
     document.getElementById('desk-history-note').textContent = `Up to ${state.history_limit} saved cycles from a bounded file tail. ${state.history_truncated ? 'Older history omitted.' : 'History may be incomplete.'} Research and fills are not joined by proximity.`;
     freshness();
+  }
+  // Replays the SAVED decision path: each stage lights in controller order and the signal only
+  // advances past a stage the record shows as passed. It stops, amber or red, where the cycle
+  // ended. Pure presentation of stored statuses; nothing is polled, predicted or executed.
+  function replay() {
+    const token = ++replayToken;
+    const steps = [...document.querySelectorAll('.desk-flow li')];
+    steps.forEach(li => li.classList.remove('lit', 'signal'));
+    cards.forEach(c => c.classList.remove('lit'));
+    core.classList.remove('lit');
+    links.forEach(p => p.classList.remove('lit'));
+    swarm.classList.remove('flowing');
+    if (!selected) return;
+    const instant = reducedMotion.matches;
+    const at = (ms, fn) => instant ? fn() : setTimeout(() => { if (token === replayToken) fn(); }, ms);
+    let delay = 0, open = true;
+    steps.forEach((li, i) => {
+      if (!open) return;
+      at(delay, () => li.classList.add('lit'));
+      if (li.dataset.tone === 'pass' && i < steps.length - 1) {
+        at(delay + 250, () => li.classList.add('signal'));
+        delay += 480;
+      } else open = false;
+    });
+    delay += 350;
+    const light = id => {
+      const card = cards.find(c => c.dataset.deskAgent === id);
+      const link = links.find(p => p.dataset.link === id);
+      if (card) card.classList.add('lit');
+      if (link && card) { link.dataset.tone = card.dataset.tone; link.classList.add('lit'); }
+    };
+    at(delay, () => swarm.classList.add('flowing'));
+    ['spotter', 'prior', 'edge'].forEach((id, i) => at(delay + i * 160, () => light(id)));
+    delay += 620;
+    at(delay, () => core.classList.add('lit'));
+    delay += 320;
+    ['risk', 'entry', 'exit'].forEach((id, i) => at(delay + i * 160, () => light(id)));
+    at(delay + 1800, () => swarm.classList.remove('flowing'));
   }
   async function refresh() {
     if (!live || reading || !panel.open || document.hidden || !canRead()) return;
@@ -169,6 +222,7 @@ function initializeAgentDesk({state, request, live, canRead}) {
     draw();
   });
   follow.addEventListener('click', () => { following = true; selected = state.cycles[0] || null; draw(); });
+  replayButton.addEventListener('click', replay);
   refreshButton.disabled = !live;
   refreshButton.hidden = !live;
   refreshButton.addEventListener('click', refresh);

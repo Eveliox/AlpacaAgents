@@ -57,7 +57,28 @@ const pause = ms => new Promise(r => setTimeout(r, ms));
     assert.match(await evaluate("document.getElementById('desk-cycle-title').textContent"),/bbbbbbbb/);
     assert.equal(await evaluate("document.querySelector('[data-desk-agent=spotter]').dataset.status"),'skipped');
     assert.equal(await evaluate("document.querySelectorAll('[data-status=not_implemented]').length"),2);
+    // Halted cycle: replay lights Reconcile red and the signal never advances past it.
+    await pause(900);
+    assert.deepEqual(await evaluate("[...document.querySelectorAll('.desk-flow li')].map(li=>li.dataset.tone+(li.classList.contains('lit')?'*':''))"),['stop*','warn','warn','warn','warn']);
+    assert.equal(await evaluate("document.querySelectorAll('.desk-flow li.signal').length"),0);
+    assert.equal(await evaluate("document.querySelector('.desk-core').dataset.tone"),'stop');
     await evaluate(`document.getElementById('desk-cycle').value='${'a'.repeat(32)}';document.getElementById('desk-cycle').dispatchEvent(new Event('change'))`);
+    // Dry-run cycle with no positions: every stage passed, the signal travels the whole strip, then the swarm lights and connectors flow, then settle.
+    await pause(300);
+    assert.deepEqual(await evaluate("[...document.querySelectorAll('.desk-flow li')].map(li=>li.dataset.tone+(li.classList.contains('signal')?'>':li.classList.contains('lit')?'*':''))"),['pass>','pass','pass','pass','pass'],'signal advances one stage at a time');
+    for(let n=0;n<80&&!(await evaluate("document.querySelector('.desk-swarm').classList.contains('flowing')"));n++)await pause(50);
+    assert(await evaluate("document.querySelector('.desk-swarm').classList.contains('flowing')"),'connectors should flow during replay');
+    assert.deepEqual(await evaluate("[...document.querySelectorAll('.desk-flow li')].map(li=>li.dataset.tone+(li.classList.contains('signal')?'>':li.classList.contains('lit')?'*':''))"),['pass>','pass>','pass>','pass>','pass*']);
+    assert.notEqual(await evaluate("getComputedStyle(document.querySelector('.desk-connectors path.lit')).animationName"),'none');
+    for(let n=0;n<80&&(await evaluate("document.querySelectorAll('.desk-agent.lit').length"))<6;n++)await pause(50);
+    assert.equal(await evaluate("document.querySelectorAll('.desk-agent.lit').length"),6);
+    assert.equal(await evaluate("document.querySelector('[data-desk-agent=risk]').dataset.tone"),'pass');
+    assert.equal(await evaluate("document.querySelector('[data-desk-agent=prior]').dataset.tone"),'warn');
+    assert.equal(await evaluate("document.querySelector('.desk-connectors path[data-link=risk]').dataset.tone"),'pass');
+    for(let n=0;n<80&&(await evaluate("document.querySelector('.desk-swarm').classList.contains('flowing')"));n++)await pause(50);
+    assert(!(await evaluate("document.querySelector('.desk-swarm').classList.contains('flowing')")),'flow animation must settle; the desk is not live');
+    await evaluate("document.getElementById('desk-replay').click()");
+    assert.equal(await evaluate("document.querySelectorAll('.desk-agent.lit').length"),0,'replay restarts from a dark graph');
     await evaluate("document.querySelector('[data-desk-agent=risk]').click()");
     assert.equal(await evaluate('document.activeElement.id'),'desk-inspector');
     assert.match(await evaluate("document.getElementById('desk-inspector').textContent"),/Moon \/ Risk budget/);
@@ -105,10 +126,14 @@ const pause = ms => new Promise(r => setTimeout(r, ms));
     }
     await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
     assert(await evaluate("getComputedStyle(document.querySelector('.desk-connectors')).animationName === 'none'"));
+    await evaluate("document.getElementById('desk-replay').click()");
+    assert.equal(await evaluate("document.querySelectorAll('.desk-agent.lit').length"),6,'reduced motion: final state immediately, no timers');
+    assert.equal(await evaluate("getComputedStyle(document.querySelector('.desk-connectors path.lit')).animationName"),'none');
     await send('Emulation.setScriptExecutionDisabled',{value:true});
     await send('Page.reload'); await pause(300);
     await evaluate("document.getElementById('desk-panel').open=true;document.querySelector('.desk-evidence').open=true");
     assert.match(await evaluate("document.getElementById('desk-evidence').textContent"),/MARKET_CLOSED/);
+    assert.equal(await evaluate("document.querySelector('.desk-flow li').dataset.tone"),'stop','no-JS page still colours the recorded path');
     assert(await evaluate("document.getElementById('desk-cycle').disabled"));
     assert.equal(await evaluate("document.getElementById('desk-cycle').value"), (offline ? 'b' : 'c').repeat(32));
     assert.deepEqual(errors,[]);
@@ -118,7 +143,7 @@ const pause = ms => new Promise(r => setTimeout(r, ms));
       assert(requests.every(r=>new URL(r.url).origin===origin));
       assert(requests.every(r=>r.method==='GET'),'Desk must only issue GET requests');
     }
-    console.log(`PASS Agent Desk ${offline?'offline':'served'}: six views, cycle selection, native details, risk/proposal provenance, XSS, polling/pinning/disconnection, responsive and no-JS, no action requests.`);
+    console.log(`PASS Agent Desk ${offline?'offline':'served'}: six views, signal-path replay, cycle selection, native details, risk/proposal provenance, XSS, polling/pinning/disconnection, responsive and no-JS, no action requests.`);
   } finally {
     if(send && ws && ws.readyState===WebSocket.OPEN){try{await Promise.race([send('Browser.close'),pause(1000)]);}catch{}}
     if(ws)ws.close(); if(browser)browser.kill(); fixture.stdin.end(); await pause(600); fixture.kill();
