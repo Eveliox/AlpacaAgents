@@ -16,7 +16,7 @@ from pathlib import Path
 import re
 import tempfile
 
-from .scanner.scan import INDEX_ETFS
+from .scanner.scan import earnings_exempt
 
 SCHEMA_VERSION = 1
 MAX_CHECK_AGE_DAYS = 45      # companies reschedule; re-verify at least every 45 days
@@ -71,8 +71,8 @@ def load(path: Path, *, today: date) -> dict:
         if not isinstance(symbol, str) or not SYMBOL.fullmatch(symbol):
             issue("invalid symbol")
             continue
-        if symbol in INDEX_ETFS:
-            issue("index ETFs have no earnings; remove this entry")
+        if earnings_exempt(symbol):
+            issue("funds have no earnings; remove this entry")
             continue
         if not isinstance(entry, dict):
             issue("entry must be an object with date and checked")
@@ -145,8 +145,8 @@ def main(argv=None) -> int:
             symbol = args.symbol.upper()
             if not SYMBOL.fullmatch(symbol):
                 parser.error("symbol must be 1-6 uppercase letters")
-            if symbol in INDEX_ETFS:
-                parser.error(f"{symbol} is an index ETF; it has no earnings and needs no entry")
+            if earnings_exempt(symbol):
+                parser.error(f"{symbol} is a fund with no earnings; it needs no entry")
             try:
                 when = _iso(args.date)
             except ValueError as exc:

@@ -6,7 +6,7 @@ import re
 
 from alpaca_agents.scanner.contracts import OptionQuote, is_liquid
 from alpaca_agents.scanner.indicators import Bar, validate_bars
-from alpaca_agents.scanner.scan import INDEX_ETFS, SymbolSnapshot
+from alpaca_agents.scanner.scan import SymbolSnapshot, earnings_exempt
 from .client import MarketDataError, symbol_checked
 
 MAX_QUOTE_AGE = timedelta(seconds=120)
@@ -164,7 +164,7 @@ def load_snapshot(client, *, symbol: str, completed_session: date, now: datetime
     # exists. Never load today's partial daily bar with a current option quote.
     if not 1 <= (now.date() - completed_session).days <= 4:
         raise MarketDataError("Completed session must precede today by 1-4 calendar days")
-    etf = symbol in INDEX_ETFS
+    etf = earnings_exempt(symbol)
     if etf and next_earnings is not None:
         raise MarketDataError("Supported index ETFs use explicit inapplicable earnings status")
     if not etf and (type(next_earnings) is not date or next_earnings <= now.date()):

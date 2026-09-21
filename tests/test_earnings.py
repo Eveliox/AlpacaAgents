@@ -54,7 +54,7 @@ class EarningsFileTests(unittest.TestCase):
         self.assertIn("future", reasons["TSLA"])
         self.assertIn("YYYY-MM-DD", reasons["META"])
         self.assertIn("object", reasons["GOOG"])
-        self.assertIn("ETF", reasons["SPY"])
+        self.assertIn("no earnings", reasons["SPY"])
         self.assertIn("invalid symbol", reasons["aapl"])
         self.assertIn("source", reasons["AMZN"])
 

@@ -69,7 +69,25 @@ Audited (Jan 2023–Sep 2026, 929 bars):
 | bounce (all) | negative or tiny samples (2–9 trades): stop design is structurally flawed (swing low is usually today's low) |
 | breakout | 1 trade per symbol: no conclusion |
 
-Only QQQ trend is a candidate, and it is thin. Owner later approved QQQ trend for paper execution (2026-09-21); this does not strengthen the backtest evidence. The earlier
+Only QQQ trend is a candidate, and it is thin. Owner later approved QQQ trend for paper execution (2026-09-21); this does not strengthen the backtest evidence.
+
+**2026-09-21 finding: the QQQ loop cannot place an order at the $100 cap.** The
+scanner's contract selector (0.40 delta, 30–45 DTE) priced QQQ at $1,222, SPY
+$950, IWM $324 per contract against Moon's $100 max loss. Every signal will be
+refused with "exceeds premium cap". The backtests replay the underlying and never
+saw option prices, so the audit did not catch it. Index-ETF options are out of
+reach on a $2k account at this cap; the only fits found were cheap funds (TLT
+$66). A 113-name large-cap batch (`runtime/backtest-batch/`) showed the trend
+playbook has no out-of-sample edge on single stocks (clean selection on 2023–24
+held in 4/32 names for 2025–26, below the 15% base rate). Do not widen the stock
+universe with this playbook.
+
+**Manual playbook** (`manual.py`, `scan.build_manual_idea`): owner-drafted single
+idea, same schema and `_build_idea` as the scanner, ATR-based levels, needs
+`manual.approved` + `--enable-playbook manual` + `--manual-idea FILE`. Draft
+expires in 10 min and is consumed after one attempt. Built for the owner's demo
+trade request; it is a Layer-1 idea source, not an order shortcut.
+`NO_EARNINGS_ETFS` in `scan.py` is the explicit earnings-exempt fund list. The earlier
 "+0.63R / $63 per $100" figure was wrong and has been retracted in docs.
 
 ## 5. Exit rules (executor/exits.py) — current behaviour

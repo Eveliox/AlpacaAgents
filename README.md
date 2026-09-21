@@ -463,6 +463,43 @@ use Tab and arrow keys to navigate them with a keyboard. Filtering does not arm
 trading, approve playbooks, or allocate separate budgets. This remains a static
 snapshot: regenerate it for updated data, then refresh the browser.
 
+### Placing one trade by hand (the `manual` playbook)
+
+There is no "buy" button. A hand-picked trade is an *idea source* that joins the
+front of the same path every scanner idea takes: Moon evaluates it, the journal
+reserves and claims it, Houston submits the journal's stored body.
+
+```powershell
+# 1. Star's job: pick a real, liquid 30-45 DTE contract near 0.40 delta from the live chain.
+#    Refused at draft time if premium + fees > $100 or the symbol needs an unverified earnings date.
+python -m alpaca_agents.manual draft TLT call --note "demo: see the full flow"
+
+# 2. Approve the playbook (once, in writing, like any other) and launch with the draft:
+python -c "from pathlib import Path; Path('runtime/playbooks/manual.approved').write_text('APPROVED', encoding='utf-8')"
+python -m alpaca_agents.controller --serve --submit --every 300 --enable-playbook manual --symbols TLT --manual-idea runtime\manual-idea.json
+```
+
+On its next cycle the controller reads the draft and treats it as a proposal.
+Moon applies every entry rule ($100 max loss incl. fees, two positions, $40 daily
+breaker, settled cash, levels, contract validity). If approved and `--submit` is
+set, Houston POSTs it; the cycle report and Agent Desk show each step and reason.
+
+- A draft **expires 10 minutes** after drafting: the limit price is that moment's ask.
+- It is **used once**, whatever happens: after the cycle that attempts it, the file
+  is renamed `manual-idea.used-<id>.json`. A rejection is not retried; re-draft.
+- Levels are fixed: stop 1.0×ATR14 and target 1.5×ATR14 from the last close, so
+  the ordinary exit rules (underlying stop/target, −50% premium stop, 21-DTE time
+  stop) manage it. To close it early: `python -m alpaca_agents.executor flatten <OCC> --submit`.
+- `manual` never appears in shadow scans and needs `runtime/playbooks/manual.approved`
+  plus `--enable-playbook manual` like every playbook. A chat diagnostic cycle
+  ignores the draft.
+
+**Why TLT and not QQQ:** Moon's $100 cap means the premium must be ≤ $0.99. A
+0.40-delta 30–45 DTE QQQ call is ~$1,200, SPY ~$950, IWM ~$320. On a $2,000
+account, index-ETF options are out of reach at this cap; the scanner refuses
+them every time with "exceeds premium cap". Funds in `NO_EARNINGS_ETFS`
+(`scanner/scan.py`) need no earnings entry; anything else is a stock.
+
 ### Trading single stocks: the owner-verified earnings calendar
 
 The scanner refuses any single stock without a **verified future earnings date**

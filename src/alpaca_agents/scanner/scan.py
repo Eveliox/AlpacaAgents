@@ -8,12 +8,25 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 
-from .contracts import OptionQuote, select_debit_spread, select_long
-from .indicators import Bar
+from .contracts import DTE_MAX, DTE_MIN, OptionQuote, select_debit_spread, select_long
+from .indicators import Bar, atr
 from .signals import Signal, Skip, breakout_signal, oversold_bounce_signal, trend_signal
 
 PLAYBOOKS = ("trend_directional", "trend_debit_spread", "oversold_bounce", "breakout_continuation")
+# Owner-drafted single idea (python -m alpaca_agents.manual). Not a scanner playbook: it never
+# appears in shadow scans, but it needs the same approval marker and --enable-playbook as any other.
+MANUAL_PLAYBOOK = "manual"
 INDEX_ETFS = frozenset({"SPY", "QQQ", "IWM", "DIA"})
+# Funds with no earnings report. Explicit allowlist: an unknown symbol is a stock until proven
+# otherwise and needs a verified earnings date. Leveraged/inverse products are deliberately absent.
+NO_EARNINGS_ETFS = INDEX_ETFS | frozenset({
+    "TLT", "IEF", "HYG", "LQD", "GLD", "SLV", "USO", "GDX", "EEM", "EFA", "EWZ", "EWJ", "FXI", "KWEB",
+    "XLF", "XLE", "XLK", "XLV", "XLI", "XLP", "XLU", "XLB", "XLY", "XLRE", "XLC", "KRE", "XBI", "SMH", "ARKK", "VXX",
+})
+
+
+def earnings_exempt(symbol: str) -> bool:
+    return symbol in NO_EARNINGS_ETFS
 IV_RANK_PREFER_SPREAD = 50.0
 CENT = Decimal("0.01")
 
@@ -62,7 +75,8 @@ def _exit_plan(playbook: str, structure) -> dict:
     rules = {"trend_directional": "close back through EMA20 against position",
              "trend_debit_spread": "close back through EMA20 against position",
              "oversold_bounce": "close below recent swing low",
-             "breakout_continuation": "close back inside prior range"}
+             "breakout_continuation": "close back inside prior range",
+             MANUAL_PLAYBOOK: "none: fixed underlying stop/target only"}
     plan["underlying_stop_rule"] = rules[playbook]
     if playbook == "oversold_bounce":
         plan["time_stop_sessions"] = 10
@@ -93,6 +107,38 @@ def _build_idea(symbol, playbook, signal: Signal, structure, config: ScanConfig,
         "thesis": signal.thesis, "legs": legs,
         "playbook": playbook, "exit_plan": _exit_plan(playbook, structure), "session": as_of.isoformat(),
     }
+
+
+MANUAL_STOP_ATR, MANUAL_TARGET_ATR = 1.0, 1.5
+
+
+def build_manual_idea(snap: SymbolSnapshot, right: str, config: ScanConfig, *, as_of: date, contract_day: date, note: str):
+    """Owner-requested idea with NO signal: levels are fixed ATR14 multiples from the last close.
+
+    Goes through the same _build_idea as the scanner so the premium cap, cent rounding and
+    reward:risk floor apply before Moon ever sees it. Returns an idea dict or a refusal string.
+    """
+    if right not in ("call", "put"):
+        return "right must be call or put"
+    if not isinstance(note, str) or not note.strip():
+        return "a note explaining why is required"
+    structure = select_long(snap.chain, right, contract_day)
+    if structure is None:
+        return f"no liquid {DTE_MIN}-{DTE_MAX} DTE {right} near 0.40 delta"
+    bars = snap.bars
+    if not bars or bars[-1].day != as_of:
+        return "bars not current for session"
+    close, band = bars[-1].close, atr(bars, 14)
+    if band <= 0:
+        return "ATR14 not positive"
+    direction = "long" if right == "call" else "short"
+    sign = 1 if direction == "long" else -1
+    signal = Signal(MANUAL_PLAYBOOK, direction, close, close - sign * MANUAL_STOP_ATR * band, close + sign * MANUAL_TARGET_ATR * band, 0.5,
+                    f"MANUAL (no signal): {note.strip()[:200]}; stop {MANUAL_STOP_ATR}xATR14, target {MANUAL_TARGET_ATR}xATR14 from close {close:.2f}")
+    idea = _build_idea(snap.symbol, MANUAL_PLAYBOOK, signal, structure, config, as_of, False)
+    if isinstance(idea, dict):
+        idea["valuation_day"] = contract_day.isoformat()
+    return idea
 
 
 def _candidates(snap: SymbolSnapshot, config: ScanConfig, as_of: date, skipped: list):
@@ -155,7 +201,7 @@ def scan(snapshots, config: ScanConfig, *, as_of: date, open_symbols=frozenset()
             result.skipped.append({"symbol": sym, "playbook": "*", "reason": "one open idea per symbol"})
             continue
         if (type(snap.earnings_not_applicable) is not bool
-                or (snap.earnings_not_applicable and (sym not in INDEX_ETFS or snap.next_earnings is not None))):
+                or (snap.earnings_not_applicable and (not earnings_exempt(sym) or snap.next_earnings is not None))):
             result.skipped.append({"symbol": sym, "playbook": "*", "reason": "invalid earnings exemption"})
             continue
         if snap.next_earnings is None and not snap.earnings_not_applicable:

@@ -10,7 +10,7 @@ import tempfile
 
 from alpaca_agents.marketdata.client import DataCredentials, JsonlAudit, MarketDataClient, MarketDataError
 from alpaca_agents.marketdata.snapshot import load_snapshot, MAX_QUOTE_AGE
-from .scan import INDEX_ETFS, ScanConfig, scan
+from .scan import ScanConfig, earnings_exempt, scan
 
 
 def _save_report(path: Path, report: dict):
@@ -57,7 +57,7 @@ def main() -> int:
         calendar = load_earnings(args.runtime / "earnings.json", today=eastern_date(clock()))
         excluded = {i["symbol"]: i["reason"] for i in calendar["issues"]}
         for symbol in sorted(set(args.symbols)):
-            if symbol in INDEX_ETFS:
+            if earnings_exempt(symbol):
                 next_earnings = None
             elif symbol in calendar["verified"]:
                 next_earnings = calendar["verified"][symbol]

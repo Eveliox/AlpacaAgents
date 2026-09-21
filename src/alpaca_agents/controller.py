@@ -26,9 +26,10 @@ from .executor.exits import HeldOption, PDT_WINDOW_SESSIONS, evaluate_exit
 from .executor.reconcile import ReconcileConfig, build_risk_state, config_from_runtime
 from .executor.submit import submit_claimed
 from .gateway import control_mode
-from .scanner.scan import PLAYBOOKS
+from .scanner.scan import MANUAL_PLAYBOOK, PLAYBOOKS
 
 APPROVAL_TOKEN = "APPROVED"
+APPROVABLE = PLAYBOOKS + (MANUAL_PLAYBOOK,)
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,7 @@ def approved_playbooks(requested, approvals_dir: Path) -> tuple[frozenset, list]
     """A playbook is enabled only if <approvals_dir>/<name>.approved contains exactly APPROVED."""
     enabled, refused = set(), []
     for name in requested:
-        if name not in PLAYBOOKS:
+        if name not in APPROVABLE:
             refused.append({"playbook": name, "reason": "unknown playbook"})
             continue
         marker = approvals_dir / f"{name}.approved"
@@ -259,7 +260,7 @@ def _live_providers(session: date, audit_path: Path, universe, earnings_path: Pa
     from .earnings import load as load_earnings
     from .marketdata.client import DataCredentials, JsonlAudit, MarketDataClient, MarketDataError
     from .marketdata.snapshot import load_bars, load_snapshot
-    from .scanner.scan import INDEX_ETFS, ScanConfig, scan
+    from .scanner.scan import ScanConfig, earnings_exempt, scan
     audit = JsonlAudit(audit_path)
     client = MarketDataClient(DataCredentials.from_environment(), audit=audit)
     cache, bars_cache = {}, {}
@@ -282,7 +283,7 @@ def _live_providers(session: date, audit_path: Path, universe, earnings_path: Pa
         calendar = load_earnings(earnings_path, today=trading_day) if earnings_path is not None else {"verified": {}, "issues": []}
         excluded = {i["symbol"]: i["reason"] for i in calendar["issues"]}
         for symbol in sorted(universe):
-            if symbol in INDEX_ETFS:
+            if earnings_exempt(symbol):
                 next_earnings = None
             elif symbol in calendar["verified"]:
                 next_earnings = calendar["verified"][symbol]
@@ -416,6 +417,8 @@ def main() -> int:
                         help="underlyings to scan (default SPY QQQ IWM). Single stocks are scanned only with a valid entry in runtime/earnings.json")
     parser.add_argument("--watchlist", type=Path, metavar="FILE",
                         help="JSON array of underlyings (1-505), used instead of --symbols; stocks still need verified earnings")
+    parser.add_argument("--manual-idea", type=Path, metavar="FILE",
+                        help=f"single owner draft from 'python -m alpaca_agents.manual draft'; needs --enable-playbook {MANUAL_PLAYBOOK}")
     parser.add_argument("--runtime", type=Path, default=Path("runtime"))
     parser.add_argument("--every", type=int, metavar="SECONDS",
                         help="loop: run a cycle every N seconds (>=60) until the market closes or an incident halts it")
@@ -501,10 +504,32 @@ def _make_cycle(args, rt: Path):
         # A chat diagnostic cannot reserve/claim entries or prepare exits, even
         # if the separately scheduled controller was launched with --submit.
         effective = replace(config, submit=False, enabled_playbooks=frozenset()) if dry_run else config
+        draft, manual_path = None, getattr(args, "manual_idea", None)
+
+        def ideas(**kw):
+            nonlocal draft
+            result = provider(0, **kw)
+            if manual_path is None or dry_run:
+                return result
+            # The draft joins at the front of Layer 1 like any scanner idea: Moon and the
+            # journal still decide. It is used at most once, whatever the outcome.
+            from .manual import load_draft
+            idea, status = load_draft(manual_path, now=datetime.now(timezone.utc))
+            if idea is None:
+                result["skipped"] = result.get("skipped", []) + [{"symbol": None, "playbook": MANUAL_PLAYBOOK, "reason": f"manual draft: {status}"}]
+                return result
+            draft = status
+            result["proposals"] = result.get("proposals", []) + [idea]
+            return result
+
         report = run_cycle(client=client, ledger=ledger, store=store, journal=journal, notifier=notifier,
-                           ideas_provider=lambda **kw: provider(0, **kw), closes_provider=lambda s: provider(1, s),
+                           ideas_provider=ideas, closes_provider=lambda s: provider(1, s),
                            bars_provider=lambda s: provider(2, s), bids_provider=lambda s: provider(3, s),
                            now=now, config=effective, report_path=rt / "cycles.jsonl")
+        if draft is not None:
+            from .manual import consume
+            used = consume(manual_path, draft)
+            print(f"manual draft {draft} consumed -> {used}" if used else f"WARNING: could not retire manual draft {draft}; remove {manual_path} by hand", file=sys.stderr)
         if args.dashboard or args.serve:
             from .dashboard import build
             build(rt, rt / "dashboard.html", now=datetime.now(timezone.utc))
