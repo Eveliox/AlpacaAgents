@@ -295,7 +295,7 @@ def _live_providers(session: date, audit_path: Path, universe, earnings_path: Pa
                 snapshots.append(snapshot(symbol, next_earnings))
             except MarketDataError as exc:
                 errors.append({"symbol": symbol, "reason": str(exc)})
-        result = scan(snapshots, ScanConfig(universe=frozenset(universe), enabled_playbooks=enabled), as_of=session,
+        result = scan(snapshots, ScanConfig(universe=frozenset(universe), enabled_playbooks=enabled & frozenset(PLAYBOOKS)), as_of=session,
                       open_symbols=open_symbols)
         for idea in result.shadow:
             audit({"event": "shadow_idea", "timestamp": datetime.now(timezone.utc).isoformat(), "idea": idea})

@@ -137,6 +137,7 @@ class UniverseAndProviderTests(unittest.TestCase):
             return fake_snapshot
         scanned = []
         def fake_scan(snapshots, config, *, as_of, open_symbols):
+            self.assertEqual(config.enabled_playbooks, frozenset({"trend_directional"}))
             scanned.extend(s.symbol for s in snapshots)
             return Mock(proposals=[], shadow=[], skipped=[])
         with patch("alpaca_agents.marketdata.client.DataCredentials.from_environment", return_value=Mock(key="k")), \
@@ -144,7 +145,7 @@ class UniverseAndProviderTests(unittest.TestCase):
              patch("alpaca_agents.marketdata.snapshot.load_snapshot", side_effect=fake_load), \
              patch("alpaca_agents.scanner.scan.scan", side_effect=fake_scan):
             providers = _live_providers(TODAY - timedelta(days=3), self.rt / "audit.jsonl", ["AAPL", "MSFT", "NVDA", "QQQ"], self.rt / "earnings.json")
-            providers[4](frozenset())
+            providers[4](frozenset({"trend_directional", "manual"}))   # 'manual' must never reach scan()
             result = providers[0](open_symbols=frozenset(), trading_day=TODAY)
         self.assertEqual(sorted(calls), [("AAPL", date(2026, 10, 30)), ("QQQ", None)])
         reasons = {s["symbol"]: s["reason"] for s in result["skipped"]}
