@@ -143,6 +143,16 @@ def contract_bid(client, *, symbol: str, contract: str, now: datetime) -> Decima
         return None
 
 
+def load_bars(client, *, symbol: str, completed_session: date) -> tuple[Bar, ...]:
+    """Daily bars only, for exit management of a held underlying. No option chain, no earnings gate:
+    a position must stay manageable even if its earnings entry has since aged out."""
+    symbol_checked(symbol)
+    if type(completed_session) is not date:
+        raise MarketDataError("Completed session date required")
+    return normalize_bars(client.daily_bars(symbol, start=completed_session - timedelta(days=450), end=completed_session),
+                          symbol=symbol, completed_session=completed_session)
+
+
 def load_snapshot(client, *, symbol: str, completed_session: date, now: datetime,
                   next_earnings: date | None = None, clock=None) -> SnapshotResult:
     symbol_checked(symbol)

@@ -463,6 +463,41 @@ use Tab and arrow keys to navigate them with a keyboard. Filtering does not arm
 trading, approve playbooks, or allocate separate budgets. This remains a static
 snapshot: regenerate it for updated data, then refresh the browser.
 
+### Trading single stocks: the owner-verified earnings calendar
+
+The scanner refuses any single stock without a **verified future earnings date**
+and refuses any contract that expires on or after it. Index ETFs are exempt.
+That gate's input is `runtime/earnings.json`, and the only supported way to
+write it is you, after checking the company's investor-relations page:
+
+```powershell
+python -m alpaca_agents.earnings set AAPL 2026-10-30 --source investor.apple.com
+python -m alpaca_agents.earnings list      # every entry with its verdict
+python -m alpaca_agents.earnings remove AAPL
+```
+
+`set` stamps today as the `checked` date. An entry is **excluded** (and the stock
+is not scanned) when: it was checked more than 45 days ago, its date has passed,
+it is more than 200 days out, it is an ETF, or the file is malformed. Exclusions
+show in the **Earnings** panel and in each cycle's skipped list with the reason.
+A model may *draft* a list for you in chat; it will say so. Its dates are
+recalled from training, not looked up, and must not be entered unverified.
+
+Then scan or trade a wider universe:
+
+```powershell
+# any symbols; stocks without a valid entry are skipped before any data call
+python -m alpaca_agents.controller --symbols QQQ AAPL MSFT NVDA --serve --submit --every 300 --enable-playbook trend_directional --dashboard
+# or a JSON array file of 1-505 symbols
+python -m alpaca_agents.controller --watchlist runtime\watchlist.json ...
+```
+
+The universe is whatever you list; there is no built-in index membership. A
+playbook approval marker is not symbol-scoped: once `trend_directional` is
+approved, it applies to every symbol you pass. There is **no backtest evidence
+for single stocks** in this repo; run `python -m alpaca_agents.backtest` on a
+name before trusting it, and keep the universe small until you have.
+
 ### Recurring scalp / swing research (no orders)
 
 The new **Scan profiles** panel switches between saved scalp and swing research.

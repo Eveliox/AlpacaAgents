@@ -20,6 +20,7 @@ from .executor.eastern import eastern_date
 from .gateway import control_mode
 from .scanner.scan import PLAYBOOKS
 from .research_scan import read_reports
+from .earnings import MAX_CHECK_AGE_DAYS, load as load_earnings
 
 AGENTS = (
     ("houston", "Houston", "Executor", "Checks broker records, sends approved paper orders and manages exits."),
@@ -217,7 +218,10 @@ def collect(runtime: Path, *, now: datetime) -> dict:
                 _warning(issues, f"{path.name}: unsupported research report; not displayed.")
             else:
                 research.append({**report, "file": path.name})
-    return {"now": now, "today": today, "control": control, "approvals": approvals, "daily_loss": loss, "daily_net": net,
+    calendar = load_earnings(runtime / "earnings.json", today=today)
+    earnings = {"file": calendar["file"], "verified": [{"symbol": s, "date": d.isoformat()} for s, d in sorted(calendar["verified"].items())],
+                "issues": calendar["issues"]}
+    return {"now": now, "today": today, "control": control, "approvals": approvals, "daily_loss": loss, "daily_net": net, "earnings": earnings,
             "latched": latched, "inventory": inventory, "closed": closed, "intents": intents, "live": live,
             "order_events": events, "cycles": cycles, "notifications": notifications, "shadow": shadow,
             "shadow_counts": shadow_counts, "traces": traces, "research": research, "issues": issues,
@@ -380,6 +384,19 @@ def render(d: dict, *, studio=None, desk=None) -> str:
     ideas = _table(["Symbol", "Playbook", "Thesis"], [(r.get("symbol"), r.get("playbook"), r.get("thesis")) for r in _records(shadow.get("shadow"))], empty="No shadow ideas recorded. Check errors and report age before interpreting this as no setups.")
     scan_body = (f'<p>{_pill(scan_age, scan_cls)} <span class="dim small">{_e(t(shadow.get("generated_at")))}</span></p>' + errors + ideas) if shadow else _empty("Run a shadow scan with realtime options access. Stocks Advanced supports stock research, not realtime option selection.")
     panels.append(_panel("star", "Scan health & ideas", scan_body))
+    cal = _dict(d.get("earnings"))
+    verified_rows = [(r.get("symbol"), r.get("date")) for r in _records(cal.get("verified"))]
+    issue_rows = [(r.get("symbol"), r.get("reason")) for r in _records(cal.get("issues"))]
+    cal_body = (f'<p>{_pill(f"{len(verified_rows)} verified", "ok" if verified_rows else "dim")} '
+                f'{_pill(f"{len(issue_rows)} excluded", "warn" if issue_rows else "dim")} '
+                f'<span class="dim small">file: {_e(cal.get("file", "unknown"))}</span></p>'
+                '<p class="dim small">Single stocks are scanned only with a date you verified on the company\'s investor-relations page. '
+                f'Entries expire {MAX_CHECK_AGE_DAYS} days after checking; past dates are excluded until the next one is entered. '
+                'Index ETFs need no entry. A model\'s guess is not a source.</p>'
+                + _table(["Stock", "Next earnings (verified)"], verified_rows, empty="No verified stocks: only index ETFs can be scanned.")
+                + _table(["Stock", "Why excluded"], issue_rows, empty="No excluded entries.")
+                + _command("python -m alpaca_agents.earnings set AAPL 2026-10-30 --source investor.apple.com"))
+    panels.append(_panel("star", "Verified earnings calendar", cal_body))
     profiles = []
     for style in ('scalp', 'swing'):
         report = d.get('research_scans', {}).get(style)
@@ -466,6 +483,7 @@ def render(d: dict, *, studio=None, desk=None) -> str:
 <a href="#research-lab"><span aria-hidden="true">↗</span>Research</a>
 <a href="#scan-health-ideas"><span aria-hidden="true">⌕</span>Scanner</a>
 <a href="#scalp-swing-research"><span aria-hidden="true">≋</span>Scan profiles</a>
+<a href="#verified-earnings-calendar"><span aria-hidden="true">▣</span>Earnings</a>
 <a href="#risk-checks"><span aria-hidden="true">◇</span>Risk &amp; limits</a>
 <a href="#cycles"><span aria-hidden="true">≡</span>Activity</a>
 <a href="#agent-chat"><span aria-hidden="true">◌</span>Chat</a>

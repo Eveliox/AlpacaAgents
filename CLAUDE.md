@@ -17,6 +17,9 @@ full reference; `PLAYBOOK.md` is the operator routine. The current task spec is
 8. **Tests are the spec.** Run `python -m unittest discover -s tests` and `node --test tests/test_dashboard_chat.cjs` before every commit. Behaviour changes need tests; the full-lifecycle controller test must keep passing.
 9. **Secrets never enter the repo, the dashboard, or chat.** The owner's keys were exposed in a chat transcript and must be rotated — remind them.
 10. **Windows.** Create marker files with Python (`write_text(..., encoding="utf-8")`), never PowerShell `echo` (UTF-16).
+11. **No model in a data gate.** `runtime/earnings.json` is written only by the owner via `python -m alpaca_agents.earnings set`. Never have an LLM, a chat tool, or any code path fill in earnings dates (or any other fact the scanner refuses to trade without). A model's recall is not a source; unknown stays unknown and the stock stays skipped. The owner asked for this once and was refused; refuse again.
+
+The repo lives at `E:\AlpacaAgent` (moved from C: on 2026-09-21 when that drive filled). Use `.venv\Scripts\python.exe` there; `E:\AlpacaLaunchers\Start-QQQ-Paper.ps1` is the launch script. The old C: path's `runtime` is a junction to E:'s, so an old command still hits the same lock.
 
 ## Working style
 

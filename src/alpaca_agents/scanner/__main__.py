@@ -33,20 +33,42 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Polygon/Massive shadow scanner; NO orders or playbook enablement")
     parser.add_argument("--session", type=date.fromisoformat, required=True,
                         help="Last completed US trading session (explicit until calendar integration)")
-    parser.add_argument("--symbols", nargs="+", choices=sorted(INDEX_ETFS), default=["SPY", "QQQ", "IWM"])
+    parser.add_argument("--symbols", nargs="+", default=None, metavar="SYM",
+                        help="underlyings (default SPY QQQ IWM); stocks need a valid entry in <runtime>/earnings.json")
+    parser.add_argument("--watchlist", type=Path, help="JSON array of underlyings instead of --symbols")
+    parser.add_argument("--runtime", type=Path, default=Path("runtime"), help="where earnings.json lives")
     parser.add_argument("--audit", type=Path, default=Path("runtime/market-data.jsonl"))
     parser.add_argument("--output", type=Path, default=Path("runtime/shadow-scan.json"))
     args = parser.parse_args()
     if args.audit.resolve() == args.output.resolve():
         parser.error("audit and output paths must differ")
+    from alpaca_agents.controller import load_universe
+    from alpaca_agents.earnings import load as load_earnings
+    from alpaca_agents.executor.eastern import eastern_date
+    try:
+        args.symbols = load_universe(args.symbols, args.watchlist)
+    except ValueError as exc:
+        parser.error(str(exc))
     try:
         audit = JsonlAudit(args.audit)
         client = MarketDataClient(DataCredentials.from_environment(), audit=audit)
         sources, loads, errors = [], [], []
         clock = lambda: datetime.now(timezone.utc)
+        calendar = load_earnings(args.runtime / "earnings.json", today=eastern_date(clock()))
+        excluded = {i["symbol"]: i["reason"] for i in calendar["issues"]}
         for symbol in sorted(set(args.symbols)):
+            if symbol in INDEX_ETFS:
+                next_earnings = None
+            elif symbol in calendar["verified"]:
+                next_earnings = calendar["verified"][symbol]
+            else:
+                error = {"symbol": symbol, "reason": "earnings not verified: " + excluded.get(symbol, excluded.get("*", "no entry in earnings.json"))}
+                errors.append(error)
+                audit({"event": "snapshot_rejected", "timestamp": clock().isoformat(), **error})
+                continue
             try:
-                loaded = load_snapshot(client, symbol=symbol, completed_session=args.session, now=clock(), clock=clock)
+                loaded = load_snapshot(client, symbol=symbol, completed_session=args.session, now=clock(),
+                                       next_earnings=next_earnings, clock=clock)
                 loads.append(loaded)
                 for issue in loaded.diagnostics:
                     audit({"event": "contract_filtered", "timestamp": clock().isoformat(), **issue})

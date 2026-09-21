@@ -59,6 +59,36 @@ def approved_playbooks(requested, approvals_dir: Path) -> tuple[frozenset, list]
     return frozenset(enabled), refused
 
 
+MAX_UNIVERSE = 505
+
+
+def load_universe(symbols, watchlist: Path | None) -> list:
+    """Explicit, validated, de-duplicated underlyings. No implicit index membership; a
+    watchlist is whatever the owner put in the file, and the earnings gate still applies."""
+    if watchlist is not None:
+        try:
+            raw = watchlist.read_bytes()
+        except OSError:
+            raise ValueError(f"cannot read watchlist {watchlist}") from None
+        if len(raw) > 16384:
+            raise ValueError("watchlist over 16 KiB")
+        try:
+            symbols = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise ValueError("watchlist must be a JSON array of symbols") from None
+    if symbols is None:
+        symbols = ["SPY", "QQQ", "IWM"]
+    if not isinstance(symbols, list) or not 1 <= len(symbols) <= MAX_UNIVERSE:
+        raise ValueError(f"1-{MAX_UNIVERSE} symbols required")
+    checked = []
+    for s in symbols:
+        if not isinstance(s, str) or not re.fullmatch(r"[A-Z]{1,6}", s):
+            raise ValueError(f"invalid symbol {s!r}: 1-6 uppercase letters")
+        if s not in checked:
+            checked.append(s)
+    return checked
+
+
 def _append(path: Path, record: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as stream:
@@ -219,27 +249,49 @@ def previous_weekday(day: date) -> date:
     return previous_session(day)
 
 
-def _live_providers(session: date, audit_path: Path, universe):
-    """Massive-backed idea and close providers. Imported lazily; tests never call this."""
+def _live_providers(session: date, audit_path: Path, universe, earnings_path: Path | None = None):
+    """Massive-backed idea and close providers. Imported lazily; tests never call this.
+
+    Single stocks are scanned only when the owner-verified earnings file has a valid
+    entry; that lookup happens before any network call, so an unverified name costs
+    nothing and is reported as skipped with the reason. Index ETFs need no entry.
+    """
+    from .earnings import load as load_earnings
     from .marketdata.client import DataCredentials, JsonlAudit, MarketDataClient, MarketDataError
-    from .marketdata.snapshot import load_snapshot
-    from .scanner.scan import ScanConfig, scan
+    from .marketdata.snapshot import load_bars, load_snapshot
+    from .scanner.scan import INDEX_ETFS, ScanConfig, scan
     audit = JsonlAudit(audit_path)
     client = MarketDataClient(DataCredentials.from_environment(), audit=audit)
-    cache = {}
+    cache, bars_cache = {}, {}
 
-    def snapshot(symbol):
+    def snapshot(symbol, next_earnings=None):
         if symbol not in cache:
             now = datetime.now(timezone.utc)
             cache[symbol] = load_snapshot(client, symbol=symbol, completed_session=session, now=now,
-                                          clock=lambda: datetime.now(timezone.utc)).snapshot
+                                          next_earnings=next_earnings, clock=lambda: datetime.now(timezone.utc)).snapshot
         return cache[symbol]
+
+    def bars_for(symbol):
+        if symbol not in bars_cache:
+            bars_cache[symbol] = cache[symbol].bars if symbol in cache else load_bars(client, symbol=symbol, completed_session=session)
+        return bars_cache[symbol]
 
     def ideas_provider(*, open_symbols, trading_day):
         snapshots, errors = [], []
+        # Re-read every cycle: the owner may verify a name while the loop runs.
+        calendar = load_earnings(earnings_path, today=trading_day) if earnings_path is not None else {"verified": {}, "issues": []}
+        excluded = {i["symbol"]: i["reason"] for i in calendar["issues"]}
         for symbol in sorted(universe):
+            if symbol in INDEX_ETFS:
+                next_earnings = None
+            elif symbol in calendar["verified"]:
+                next_earnings = calendar["verified"][symbol]
+            else:
+                errors.append({"symbol": symbol, "playbook": "*",
+                               "reason": "earnings not verified: " + excluded.get(symbol, excluded.get("*", "no entry in runtime/earnings.json"))})
+                continue
             try:
-                snapshots.append(snapshot(symbol))
+                snapshots.append(snapshot(symbol, next_earnings))
             except MarketDataError as exc:
                 errors.append({"symbol": symbol, "reason": str(exc)})
         result = scan(snapshots, ScanConfig(universe=frozenset(universe), enabled_playbooks=enabled), as_of=session,
@@ -252,7 +304,7 @@ def _live_providers(session: date, audit_path: Path, universe):
         closes = {}
         for symbol in symbols:
             try:
-                bars = snapshot(symbol).bars
+                bars = bars_for(symbol)
                 if bars and bars[-1].day == session:
                     closes[symbol] = Decimal(str(bars[-1].close))
             except MarketDataError:
@@ -263,7 +315,7 @@ def _live_providers(session: date, audit_path: Path, universe):
         out = {}
         for symbol in symbols:
             try:
-                bars = snapshot(symbol).bars
+                bars = bars_for(symbol)
                 if bars and bars[-1].day == session:
                     out[symbol] = bars
             except MarketDataError:
@@ -354,14 +406,16 @@ def main() -> int:
     from .executor.history import ActivityStore
     from .executor.orders import OrderJournal
     from .notify import Notifier
-    from .scanner.scan import INDEX_ETFS
 
     parser = argparse.ArgumentParser(description="One PAPER trading cycle. Submits nothing unless --submit.")
     parser.add_argument("--submit", action="store_true", help="allow journal-prepared PAPER orders to be POSTed")
     parser.add_argument("--enable-playbook", action="append", default=[], metavar="NAME",
                         help="requires runtime/playbooks/NAME.approved containing APPROVED")
     parser.add_argument("--session", type=date.fromisoformat, help="last completed session (default: previous weekday)")
-    parser.add_argument("--symbols", nargs="+", choices=sorted(INDEX_ETFS), default=["SPY", "QQQ", "IWM"])
+    parser.add_argument("--symbols", nargs="+", default=None, metavar="SYM",
+                        help="underlyings to scan (default SPY QQQ IWM). Single stocks are scanned only with a valid entry in runtime/earnings.json")
+    parser.add_argument("--watchlist", type=Path, metavar="FILE",
+                        help="JSON array of underlyings (1-505), used instead of --symbols; stocks still need verified earnings")
     parser.add_argument("--runtime", type=Path, default=Path("runtime"))
     parser.add_argument("--every", type=int, metavar="SECONDS",
                         help="loop: run a cycle every N seconds (>=60) until the market closes or an incident halts it")
@@ -372,6 +426,12 @@ def main() -> int:
         parser.error("--every must be at least 60 seconds")
     if args.serve and args.submit and args.every is None:
         parser.error("--serve --submit requires --every; on-demand chat cycles are always dry")
+    if args.symbols and args.watchlist:
+        parser.error("use --symbols or --watchlist, not both")
+    try:
+        args.symbols = load_universe(args.symbols, args.watchlist)
+    except ValueError as exc:
+        parser.error(str(exc))
     rt = args.runtime
     try:
         with RuntimeLock(rt):
@@ -434,7 +494,7 @@ def _make_cycle(args, rt: Path):
             nonlocal providers
             if providers is None:
                 session = args.session or previous_weekday(eastern_date(now))
-                providers = _live_providers(session, rt / "market-data.jsonl", args.symbols)
+                providers = _live_providers(session, rt / "market-data.jsonl", args.symbols, rt / "earnings.json")
                 providers[4](enabled)
             return providers[index](*a, **kw)
 

@@ -67,6 +67,9 @@ def display_snapshot(raw):
             d["shadow"][name] = [_pick(r, keys) for r in shadow[name] if isinstance(r, dict)]
     # read_reports() is a bounded fixed-field projection, not raw provider records.
     d['research_scans'] = raw.get('research_scans', {})
+    cal = raw.get('earnings') if isinstance(raw.get('earnings'), dict) else {}
+    d['earnings'] = {'file': cal.get('file'), 'verified': [_pick(r, 'symbol date') for r in cal.get('verified', []) if isinstance(r, dict)],
+                     'issues': [_pick(r, 'symbol reason') for r in cal.get('issues', []) if isinstance(r, dict)]}
     d["research"] = []
     for r in raw["research"]:
         item = _pick(r, "symbol file first_bar last_bar generated_at options_pnl_modelled level")
