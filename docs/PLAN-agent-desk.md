@@ -103,6 +103,34 @@ references may link journal records; expose separate sanitized display IDs.
 - Existing rules/controller/submitter remain unchanged. PLAYBOOK.md's incorrect
   claim that DISABLED performs scanning is corrected.
 
+## Dashboard redesign — collaboration canvas
+
+The desk now opens by default immediately after the account/attention overview.
+The midnight-blue/lilac skin lives in `dashboard_polish.py`; no remote assets or
+frameworks were added. Distinct glyph cards show each view's task and recorded
+status. Curved connections share an evidence hub; the separate directional strip
+preserves the actual controller order (exits before entries).
+
+- Progress means **stages with pass evidence**, not task completion, fill success,
+  or confidence. Missing cycles show Unknown with no meter.
+- Recorded, skipped, blocked, unknown and unbuilt states remain distinct. No
+  active/waiting agent telemetry or communication/delegation events are invented.
+- Only pass-evidence connectors flow during the finite replay; unbuilt research
+  connectors stay dashed and still. No animated idle/live-agent loop.
+- Pause cancels pending replay callbacks and settles to readable evidence.
+  OS reduced motion cannot be overridden. Hidden documents/closed panels settle;
+  polling the same cycle does not restart animation.
+- Inputs/outputs, provenance, history and raw evidence use native disclosures.
+  Existing proposals, risk reasons, activity, offline evidence and security guards
+  remain accessible. Extra operational/reference panels start collapsed.
+- Browser coverage includes pause/resume, system preference changes, inactive
+  research links, progress, desktop/mobile, offline/served and no-JS behavior.
+
+An already-running Python server keeps its imported UI modules until restarted.
+Use `python -m alpaca_agents.dashboard --output runtime/dashboard-redesign.html`
+for a read-only preview without interrupting position management. No controller,
+research process, approval marker or journal must be changed to preview the UI.
+
 ## Phase B — first-class event capture and frozen evidence
 
 Instrument the existing orchestration boundaries, not rules.py or exits.py.

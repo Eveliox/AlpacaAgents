@@ -20,6 +20,17 @@ def tone(status):
     return TONES.get(status, 'warn')
 
 
+# Display-only vocabulary; never infer a currently running agent from a saved cycle.
+LABELS = {'recorded': 'Completed · recorded', 'risk_pass': 'Passed · recorded',
+          'submission_recorded': 'Submitted · not a fill', 'dry_run': 'Completed · dry run',
+          'skipped': 'Skipped', 'not_implemented': 'Not built', 'unknown': 'Unknown',
+          'rejected': 'Blocked · rejected', 'error': 'Blocked · error', 'uncertain': 'Needs reconciliation'}
+TASKS = {'spotter': 'Find setups & screen candidates', 'prior': 'Calibrated prior · unavailable',
+         'edge': 'Option expectancy · unavailable', 'risk': 'Check cash, limits & entry risk',
+         'entry': 'Reserve → claim → paper submit', 'exit': 'Review held positions & exit rules'}
+GLYPHS = {'spotter': '✦', 'prior': '◴', 'edge': '◇', 'risk': '◐', 'entry': '↗', 'exit': '↙'}
+
+
 def empty_state():
     return {"schema_version": 1, "cycles": [], "warnings": ['No controller cycles available in this snapshot.'],
             "history_truncated": False, "history_limit": 20, "limitations": LIMITATIONS,
@@ -33,25 +44,30 @@ def render_desk(state):
     options = ''.join(f'<option value="{e(x["id"])}"{" selected" if i == 0 else ""}>{e(x["completed_at"])} · {e(x["status"])} · {e(x["id"][:12])}</option>' for i, x in enumerate(cycles))
     flow = ''.join(f'<li data-tone="{tone(x["status"])}" class="lit"><strong>{e(x["name"])}</strong><span>{e(x["status"])}</span></li>' for x in c['flow']) if c else '<li>No recorded flow. Unknown is not idle.</li>'
     agents = c['agents'] if c else [{"id": k, "name": n, "role": r, "status": 'unknown', "summary": 'No cycle selected.'} for k, n, r in ROLES]
-    cards = ''.join(f'<button type="button" class="desk-agent" data-desk-agent="{e(a["id"])}" data-tone="{tone(a["status"])}" aria-controls="desk-inspector" disabled>'
-                    f'<span class="desk-role">{e(a["role"])}</span><strong>{e(a["name"])}</strong><span class="desk-state">{e(a["status"])}</span></button>' for a in agents)
+    cards = ''.join(f'<button type="button" class="desk-agent" data-desk-agent="{e(a["id"])}" data-status="{e(a["status"])}" data-tone="{tone(a["status"])}" aria-controls="desk-inspector" disabled>'
+                    f'<span class="desk-node-icon" aria-hidden="true">{GLYPHS[a["id"]]}</span><span class="desk-role">{e(a["role"])}</span><strong>{e(a["name"])}</strong>'
+                    f'<span class="desk-task">{e(TASKS[a["id"]])}</span><span class="desk-state">{e(LABELS.get(a["status"], a["status"]))}</span><span class="desk-card-hint">Inspect evidence ↗</span></button>' for a in agents)
     warnings = ''.join(f'<li>{e(w)}</li>' for w in state['warnings'])
     evidence = json.dumps(c, indent=2, ensure_ascii=True) if c else 'No saved cycle. This page does not start one.'
     return f'''<aside class="desk-module wide" id="agent-desk" aria-label="Agent Desk">
-<details id="desk-panel"><summary class="desk-launch"><span><span class="eyebrow">Decision observability</span><strong>Agent Desk</strong></span><span class="dim small">Inspect recorded decisions ↗</span></summary>
-<p class="desk-intro">Six functional views of the existing engine. Read-only: no orders, approvals or new models.</p>
-<div class="desk-toolbar"><label for="desk-cycle">Recorded cycle<select id="desk-cycle" disabled><option value="">No selection</option>{options}</select></label><button id="desk-follow" type="button" disabled>Follow latest</button><button id="desk-refresh" type="button" disabled>Refresh records</button><button id="desk-replay" type="button" disabled>▶ Replay path</button></div>
+<details id="desk-panel" open><summary class="desk-launch"><span><span class="eyebrow">The collaboration canvas</span><strong>Agent Desk</strong></span><span class="desk-record-badge">RECORDED WORKFLOW</span></summary>
+<p class="desk-intro">One system. A traceable decision path. Select an agent to see its task and evidence.</p>
+<div class="desk-brief"><div><span class="eyebrow">Selected cycle</span><h3 id="desk-outcome">{e(c['status'].replace('_', ' ')) if c else 'Waiting for evidence'}</h3><p id="desk-outcome-note">Saved decisions, not live agent activity. Active / waiting states are not captured.</p></div><div class="desk-progress"><strong id="desk-progress-label">{sum(tone(x['status']) == 'pass' for x in c['flow']) if c else 'Unknown'} / 5</strong><span>stages with pass evidence</span><meter id="desk-progress-meter" min="0" max="5" value="{sum(tone(x['status']) == 'pass' for x in c['flow']) if c else 0}" aria-label="Recorded stages with pass evidence"{' hidden' if not c else ''}></meter></div></div>
+<div class="desk-toolbar"><label for="desk-cycle">Recorded cycle<select id="desk-cycle" disabled><option value="">No selection</option>{options}</select></label><button id="desk-follow" type="button" disabled>Follow latest</button><button id="desk-refresh" type="button" disabled>Refresh records</button><button id="desk-replay" type="button" disabled>▶ Replay path</button><button id="desk-motion" type="button" aria-pressed="false" disabled>Pause motion</button></div>
+<p id="desk-replay-status" class="desk-replay-status" role="status">Saved workflow · animation is a replay, not live communication.</p>
 <p id="desk-connection" role="status">Saved snapshot · no live stage stream.</p>
-<p id="desk-freshness" class="dim small">Last read: {e(state['read_at'])}. Controller running status is not verified.</p>
+<p id="desk-freshness" class="dim small">Last read: {e(state['read_at'])}. Running status unverified.</p>
 <ul id="desk-warnings" class="desk-warnings">{warnings}</ul>
-<p id="desk-history-note" class="dim small">Up to {state['history_limit']} saved cycles. {'Older records omitted.' if state['history_truncated'] else 'History may be incomplete.'}</p>
-<div id="desk-content"><h3 id="desk-cycle-title">{e(c['id']) if c else 'No recorded cycle'}</h3>
+<div id="desk-content"><div class="desk-swarm" aria-label="Six views sharing one cycle, not six independent predictors">
+<svg class="desk-connectors" viewBox="0 0 600 420" preserveAspectRatio="none" aria-hidden="true"><path data-link="spotter" d="M100 138 C100 210 240 170 270 210"/><path data-link="prior" d="M300 138 L300 185"/><path data-link="edge" d="M500 138 C500 210 360 170 330 210"/><path data-link="risk" d="M270 210 C240 250 100 210 100 282"/><path data-link="entry" d="M300 235 L300 282"/><path data-link="exit" d="M330 210 C360 250 500 210 500 282"/></svg>
+{cards}<div class="desk-core" data-tone="{tone(c['status']) if c else 'warn'}"><span class="eyebrow">Evidence hub</span><strong>{e(c['status']) if c else 'Unknown'}</strong><small>No consensus probability</small></div></div>
 <ol class="desk-flow" aria-label="Actual controller order">{flow}</ol>
 <p class="dim small desk-legend"><span data-tone="pass">●</span> passed, signal continued · <span data-tone="warn">●</span> skipped / unknown · <span data-tone="stop">●</span> refused / halted · Replay of the saved record, not a live stream. Exit checks precede entry scanning; DISABLED skips entry scanning and automatic exits.</p>
-<div class="desk-swarm" aria-label="Six views sharing one cycle, not six independent predictors">
-<svg class="desk-connectors" viewBox="0 0 600 300" preserveAspectRatio="none" aria-hidden="true"><path data-link="spotter" d="M100 50L300 150"/><path data-link="prior" d="M300 50L300 150"/><path data-link="edge" d="M500 50L300 150"/><path data-link="risk" d="M300 150L100 250"/><path data-link="entry" d="M300 150L300 250"/><path data-link="exit" d="M300 150L500 250"/></svg>
-{cards}<div class="desk-core" data-tone="{tone(c['status']) if c else 'warn'}"><span class="eyebrow">Shared recorded state</span><strong>{e(c['status']) if c else 'Unknown'}</strong><small>No consensus probability</small></div></div>
-<p class="dim small">Connectors mean shared evidence, not messages, signal weight or agreement.</p>
+<p class="desk-link-legend"><span>━━ Recorded evidence</span><span>┄┄ Unavailable capability</span><span>→ Direction on the stage strip = controller order</span></p>
+<p class="dim small">Connectors mean shared evidence, not messages, signal weight or agreement. No communication or delegation events are captured.</p>
+<details class="desk-metadata"><summary>Record source &amp; history</summary><p id="desk-history-note" class="dim small">Up to {state['history_limit']} saved cycles. {'Older records omitted.' if state['history_truncated'] else 'History may be incomplete.'}</p>
+<h3 id="desk-cycle-title">{e(c['id']) if c else 'No recorded cycle'}</h3>
+<p class="dim small">Journal status is current at read time; cycle verdicts remain historical. Active work and task handoffs are not captured.</p></details>
 <div id="desk-inspector" tabindex="-1" aria-live="polite"><h3>Inspect a functional view</h3><p class="dim">Select a card to inspect its recorded inputs, outputs and source.</p></div>
 <div id="desk-proposals"></div><div id="desk-activity"></div>
 <details class="desk-evidence"><summary>Complete selected-cycle evidence · also available without JavaScript</summary><pre id="desk-evidence">{e(evidence)}</pre></details></div>

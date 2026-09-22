@@ -10,11 +10,17 @@ function initializeAgentDesk({state, request, live, canRead}) {
   const inspector = document.getElementById('desk-inspector');
   const cards = [...document.querySelectorAll('[data-desk-agent]')];
   const replayButton = document.getElementById('desk-replay');
+  const motionButton = document.getElementById('desk-motion');
+  const replayStatus = document.getElementById('desk-replay-status');
   const swarm = document.querySelector('.desk-swarm');
   const core = document.querySelector('.desk-core');
   const links = [...document.querySelectorAll('.desk-connectors path')];
   let following = true, selected = state.cycles[0] || null, role = 'spotter';
-  let reading = false, disconnected = false, replayToken = 0;
+  let reading = false, disconnected = false, replayToken = 0, paused = false, renderedCycle = null;
+  const LABELS = {recorded: 'Completed · recorded', risk_pass: 'Passed · recorded',
+    submission_recorded: 'Submitted · not a fill', dry_run: 'Completed · dry run', skipped: 'Skipped',
+    not_implemented: 'Not built', unknown: 'Unknown', rejected: 'Blocked · rejected',
+    error: 'Blocked · error', uncertain: 'Needs reconciliation'};
   // Mirror of TONES in agent_desk_view.py. Unknown statuses are amber, never green.
   const TONES = {passed_at_cycle: 'pass', recorded: 'pass', risk_pass: 'pass', submission_recorded: 'pass',
                  dry_run: 'pass', ARMED_PAPER: 'pass', EXITS_ONLY: 'warn',
@@ -41,7 +47,7 @@ function initializeAgentDesk({state, request, live, canRead}) {
     const age = !Number.isFinite(when) ? 'Completion time unknown' : delta < 0 ? 'Future timestamp — check clock' :
       delta > 60000 ? `Historical / stale cycle · ${Math.floor(delta / 60000)} min since completion` : 'Recently recorded cycle, not proof of a running controller';
     const retained = selected && !state.cycles.some(c => c.id === selected.id);
-    document.getElementById('desk-freshness').textContent = `${age}. Last read: ${shown(state.read_at)}. ${retained ? 'Pinned snapshot is outside the current history window; its journal status is not refreshed.' : 'Journal status, when linked, is current at that read; cycle decisions remain historical.'}`;
+    document.getElementById('desk-freshness').textContent = `${age}. Last read: ${shown(state.read_at)}. ${retained ? 'Pinned snapshot is outside the current history window; its journal status is not refreshed.' : 'Running status unverified.'}`;
   }
   function inspect(agent, focus = false) {
     inspector.replaceChildren();
@@ -50,11 +56,13 @@ function initializeAgentDesk({state, request, live, canRead}) {
       inspector.append(node('h3', 'No recorded cycle'), node('p', 'Unknown is not idle. Viewing the desk does not start a cycle.', 'dim'));
       return;
     }
-    inspector.append(node('h3', agent.name), node('p', agent.summary), fields([
+    const technical = node('details');
+    technical.append(node('summary', 'Inputs, outputs & provenance'), fields([
       ['Recorded state', human(agent.status)], ['Confidence', agent.confidence], ['Latency (ms)', agent.latency_ms],
       ['Model', agent.model], ['Input snapshot', agent.inputs === null ? 'Not captured in these reports' : shown(agent.inputs)],
       ['Source', agent.source || 'Not implemented / no cycle evidence'], ['Cycle', selected.id]
     ]), json(agent.outputs));
+    inspector.append(node('h3', agent.name), node('p', agent.summary), technical);
     if (focus) inspector.focus({preventScroll: true});
   }
   function drawProposals() {
@@ -133,12 +141,25 @@ function initializeAgentDesk({state, request, live, canRead}) {
       card.disabled = !agent;
       card.dataset.status = agent ? agent.status : 'unknown';
       card.dataset.tone = tone(card.dataset.status);
-      card.querySelector('.desk-state').textContent = agent ? human(agent.status) : 'Unknown';
+      card.querySelector('.desk-state').textContent = agent ? LABELS[agent.status] || human(agent.status) : 'Unknown';
+      card.title = agent ? agent.summary : 'No cycle evidence';
     });
     core.dataset.tone = selected ? tone(selected.status) : 'warn';
     document.querySelector('.desk-core strong').textContent = selected ? human(selected.status) : 'Unknown';
     replayButton.disabled = !selected;
-    replay();
+    const passed = selected ? selected.flow.filter(s => tone(s.status) === 'pass').length : null;
+    document.getElementById('desk-progress-label').textContent = passed === null ? 'Unknown / 5' : `${passed} / ${selected.flow.length}`;
+    const meter = document.getElementById('desk-progress-meter');
+    meter.hidden = passed === null;
+    meter.max = selected ? selected.flow.length : 5;
+    meter.value = passed === null ? 0 : passed;
+    const blocked = selected && selected.flow.find(s => tone(s.status) === 'stop');
+    document.getElementById('desk-outcome').textContent = !selected ? 'Waiting for evidence' : blocked ? `Attention · ${blocked.name}` : LABELS[selected.status] || human(selected.status);
+    const reconciliation = selected && selected.agents.find(a => a.id === 'risk');
+    const reasons = reconciliation && reconciliation.outputs && reconciliation.outputs.cycle_reconciliation;
+    document.getElementById('desk-outcome-note').textContent = blocked && reasons && reasons.reasons.length ? reasons.reasons.join(' · ') : 'Saved decisions, not live agent activity. Active / waiting states are not captured.';
+    replay(renderedCycle === (selected && selected.id));
+    renderedCycle = selected && selected.id;
     inspect(selected && selected.agents.find(a => a.id === role));
     drawProposals(); drawActivity();
     document.getElementById('desk-evidence').textContent = selected ? JSON.stringify(selected, null, 2) : 'No saved cycle. This page does not start one.';
@@ -151,7 +172,7 @@ function initializeAgentDesk({state, request, live, canRead}) {
   // Replays the SAVED decision path: each stage lights in controller order and the signal only
   // advances past a stage the record shows as passed. It stops, amber or red, where the cycle
   // ended. Pure presentation of stored statuses; nothing is polled, predicted or executed.
-  function replay() {
+  function replay(settleOnly = false) {
     const token = ++replayToken;
     const steps = [...document.querySelectorAll('.desk-flow li')];
     steps.forEach(li => li.classList.remove('lit', 'signal'));
@@ -159,8 +180,13 @@ function initializeAgentDesk({state, request, live, canRead}) {
     core.classList.remove('lit');
     links.forEach(p => p.classList.remove('lit'));
     swarm.classList.remove('flowing');
+    const instant = settleOnly || paused || reducedMotion.matches || document.hidden || !panel.open;
+    motionButton.disabled = reducedMotion.matches;
+    motionButton.textContent = reducedMotion.matches ? 'Reduced motion' : paused ? 'Enable motion' : 'Pause motion';
+    motionButton.setAttribute('aria-pressed', String(paused || reducedMotion.matches));
+    document.getElementById('agent-desk').dataset.motion = paused || reducedMotion.matches ? 'paused' : 'enabled';
+    replayStatus.textContent = !selected ? 'No recorded path to replay.' : instant ? 'Saved workflow · motion settled. No live communication stream.' : 'Replaying recorded decisions · not live communication';
     if (!selected) return;
-    const instant = reducedMotion.matches;
     const at = (ms, fn) => instant ? fn() : setTimeout(() => { if (token === replayToken) fn(); }, ms);
     let delay = 0, open = true;
     steps.forEach((li, i) => {
@@ -184,7 +210,10 @@ function initializeAgentDesk({state, request, live, canRead}) {
     at(delay, () => core.classList.add('lit'));
     delay += 320;
     ['risk', 'entry', 'exit'].forEach((id, i) => at(delay + i * 160, () => light(id)));
-    at(delay + 1800, () => swarm.classList.remove('flowing'));
+    at(delay + 1800, () => {
+      swarm.classList.remove('flowing');
+      replayStatus.textContent = paused ? 'Motion paused · recorded evidence remains available.' : reducedMotion.matches ? 'Reduced motion · showing recorded evidence without animation.' : 'Replay settled · inspect any card for the recorded evidence.';
+    });
   }
   async function refresh() {
     if (!live || reading || !panel.open || document.hidden || !canRead()) return;
@@ -222,11 +251,14 @@ function initializeAgentDesk({state, request, live, canRead}) {
     draw();
   });
   follow.addEventListener('click', () => { following = true; selected = state.cycles[0] || null; draw(); });
-  replayButton.addEventListener('click', replay);
+  replayButton.addEventListener('click', () => replay());
+  motionButton.addEventListener('click', () => { paused = !paused; replay(); });
+  reducedMotion.addEventListener('change', () => replay(true));
+  document.addEventListener('visibilitychange', () => { if (document.hidden) replay(true); });
   refreshButton.disabled = !live;
   refreshButton.hidden = !live;
   refreshButton.addEventListener('click', refresh);
-  panel.addEventListener('toggle', () => { if (panel.open) refresh(); });
+  panel.addEventListener('toggle', () => { if (panel.open) refresh(); else replay(true); });
   connection.textContent = live ? 'Local recorded state · open the desk to refresh. Not a live stage stream.' : 'Offline snapshot · no network · rebuild to update.';
   draw();
   setInterval(() => {

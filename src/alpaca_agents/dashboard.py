@@ -13,6 +13,7 @@ import sqlite3
 import tempfile
 
 from .dashboard_style import CSS as BASE_CSS
+from .dashboard_polish import CSS as POLISH_CSS
 from .dashboard_chat import ART, avatar_uri, render_chat
 from .agent_desk import read_state as read_desk
 from .agent_desk_view import CSS as DESK_CSS, empty_state, render_desk
@@ -28,7 +29,7 @@ AGENTS = (
     ("moon", "Moon", "Rules Engine", "Checks cash, position limits and risk. Same inputs, same decision."),
     ("astra", "Astra", "Dashboard & Notifications", "Explains what happened and surfaces alerts. Read-only."),
 )
-CSS = BASE_CSS + DESK_CSS + "\n".join(
+CSS = BASE_CSS + DESK_CSS + POLISH_CSS + "\n".join(
     f'#agent-{key}:checked ~ main [data-agent]:not([data-agent="{key}"]){{display:none}}'
     for key, _, _, _ in AGENTS
 )
@@ -336,7 +337,7 @@ def render(d: dict, *, studio=None, desk=None) -> str:
     positions_count = f"{len(d['inventory'])} / 2" if ledger_known else "Unknown"
     rec_label = "No controller check yet" if not rec else "Passed at last check" if rec.get("ok") is True else "Blocked at last check"
     rec_cls = "ok" if rec.get("ok") is True and fresh_cls == "ok" else "warn"
-    status = f'''<section class="wide hero" id="overview"><div class="section-top"><div><span class="eyebrow">Account overview · options only</span><h2 class="hero-title">Paper trading</h2></div>{_pill(d['control'], control_cls)}</div>
+    status = f'''<section class="wide hero" id="overview"><div class="section-top"><div><span class="eyebrow">System snapshot · paper options</span><h2 class="hero-title">Your mission, at a glance.</h2></div>{_pill(d['control'], control_cls)}</div>
 <p class="dim">{mode_text}. One shared account and risk budget across all four roles.</p>
 <div class="metrics"><div class="metric"><span>Recorded net today · ET</span><strong>{net}</strong></div>
 <div class="metric"><span>Cumulative daily loss</span><strong class="{loss_cls}">{loss}</strong><span>{'Breaker latched' if d['latched'] else 'Breaker is not a maximum-loss guarantee'}</span></div>
@@ -344,7 +345,7 @@ def render(d: dict, *, studio=None, desk=None) -> str:
 <div class="metric"><span>Outstanding intents</span><strong>{len(d['live']) if d['orders_known'] else 'Unknown'}</strong></div></div>
 <div class="section-top"><p>{_pill(rec_label, rec_cls)} {_pill(freshness, fresh_cls)}</p><span class="dim small">Last cycle: {_e(t(last.get('finished_at')))}</span></div>
 <p class="dim small">Last cycle submission: {'enabled (paper)' if last.get('submit') is True else 'dry run' if last else 'unknown'}. Snapshot date: {_e(d['today'])} (ET). Controller running status is not verified.</p>
-<div class="next-action"><div><span class="eyebrow">Next step</span><p><strong class="{action_cls}">{_e(title)}</strong></p></div><div><p>{_e(advice)}</p><details><summary>Show diagnostic command</summary>{_command(command)}</details></div></div>
+<div class="next-action"><div><span class="eyebrow">Needs your attention / next step</span><p><strong class="{action_cls}">{_e(title)}</strong></p></div><div><p>{_e(advice)}</p><details><summary>Show diagnostic command</summary>{_command(command)}</details></div></div>
 <p class="dim small">Snapshot only. Age is calculated when rendered, not continuously. Refreshing this file does not fetch broker data.</p></section>'''
 
     panels = []
@@ -360,7 +361,7 @@ def render(d: dict, *, studio=None, desk=None) -> str:
                       f'<span class="eyebrow">{_e(role)}</span><h2>{name}</h2><p class="role">{_e(agent_states[key])}</p>'
                       f'<button class="talk-button" type="button" data-chat-agent="{key}" disabled>Talk to {name} <span aria-hidden="true">↗</span></button></section>')
     crew = ''.join(panels)
-    panels = [_research(d["research"])]
+    panels = []
 
     reasons = _list(rec.get("reasons"))
     risk = '<dl><dt>Maximum entry risk</dt><dd>$100 including estimated fees</dd><dt>Concurrent positions</dt><dd>2</dd><dt>Daily loss breaker</dt><dd>$40 cumulative losses; wins do not offset</dd></dl>'
@@ -377,7 +378,7 @@ def render(d: dict, *, studio=None, desk=None) -> str:
     panels.append(_panel("houston", "Open positions", positions + '<p class="dim small">No live marks or unrealized P&amp;L are fetched by this page.</p>'))
     playbooks = _table(["Playbook", "Approval file", "Shadow ideas"],
                        [(name, Html(_pill("APPROVED", "warn") if d["approvals"][name] else _pill("shadow only", "dim")), d["shadow_counts"][name]) for name in PLAYBOOKS], numeric={2})
-    panels.append(_panel("star", "Playbooks", playbooks + '<p class="dim small">Approval is not enablement. The controller also requires --enable-playbook, an armed control mode, valid checks and --submit. Debit-spread execution is not implemented.</p>'))
+    panels.append(_panel("star", "Playbooks", playbooks + '<p class="dim small">Approval is not enablement. The controller also requires --enable-playbook, an armed control mode, valid checks and --submit. Debit-spread execution is not implemented.</p>', collapsed=True))
     shadow = d["shadow"]
     scan_age, scan_cls = _age(shadow.get("generated_at"), d["now"], seconds=120)
     errors = _table(["Symbol", "Why data was rejected"], [(r.get("symbol"), r.get("reason")) for r in _records(shadow.get("errors"))], empty="No snapshot errors recorded in this report.")
@@ -396,7 +397,7 @@ def render(d: dict, *, studio=None, desk=None) -> str:
                 + _table(["Stock", "Next earnings (verified)"], verified_rows, empty="No verified stocks: only index ETFs can be scanned.")
                 + _table(["Stock", "Why excluded"], issue_rows, empty="No excluded entries.")
                 + _command("python -m alpaca_agents.earnings set AAPL 2026-10-30 --source investor.apple.com"))
-    panels.append(_panel("star", "Verified earnings calendar", cal_body))
+    panels.append(_panel("star", "Verified earnings calendar", cal_body, collapsed=True))
     profiles = []
     for style in ('scalp', 'swing'):
         report = d.get('research_scans', {}).get(style)
@@ -419,7 +420,8 @@ def render(d: dict, *, studio=None, desk=None) -> str:
                      '<p class="notice">Underlying research only — NOT an options proposal or a trading-mode switch. '
                      'No contracts selected, no option liquidity checks, no new order path. Stocks require verified earnings and instrument data. '
                      'Scalp execution and same-day exit policy are not implemented. Refresh the page to load new reports.</p>' + ''.join(profiles))
-    panels.append(_panel('star', 'Scalp & swing research', research_body, wide=True))
+    panels.append(_panel('star', 'Scalp & swing research', research_body, wide=True, collapsed=True))
+    panels.append(_research(d['research']))
 
     closed = _table(["Day", "Contract", "Booked fill P&L"],
                     [(r["trading_day"], r["contract"], Html(f'<span class="{"ok" if r["pnl_units"] >= 0 else "bad"}">${Decimal(r["pnl_units"]) / 1_000_000:.2f}</span>')) for r in d["closed"]], numeric={2},
@@ -429,9 +431,9 @@ def render(d: dict, *, studio=None, desk=None) -> str:
     panels.append(_panel("astra", "Notifications", notes))
     workflow = '<ol><li><strong>Before a session:</strong> load keys locally and reconcile. Stop on unexplained blockers.</li><li><strong>Research:</strong> compare historical reports; keep unvalidated playbooks disabled.</li><li><strong>After a session:</strong> review fills, errors and exit reasons. Record surprises before changing any rules.</li></ol>'
     workflow += '<details><summary>Safe PowerShell commands (no order submission)</summary>' + _command("python -m alpaca_agents.executor reconcile\npython -m alpaca_agents.executor intents\npython -m alpaca_agents.dashboard\nStart-Process runtime\\dashboard.html") + '</details>'
-    panels.append(_panel("astra", "Your daily routine", workflow))
+    panels.append(_panel("astra", "Your daily routine", workflow, collapsed=True))
     modes = '<dl><dt>DISABLED</dt><dd>No automatic entries or exits.</dd><dt>EXITS_ONLY</dt><dd>No new entries. Exits need --submit and a running controller.</dd><dt>ARMED_PAPER</dt><dd>Entries and exits permitted, but still subject to all checks.</dd></dl><p class="notice">Closing PowerShell may stop the controller. Dashboard filters do not control trading. Do not leave open positions assuming this page is managing them.</p>'
-    panels.append(_panel("moon", "Understand your controls", modes))
+    panels.append(_panel("moon", "Understand your controls", modes, collapsed=True))
 
     intents = _table(["Time · UTC", "Kind", "Status", "Contract", "Cost", "Broker ID", "Reason"],
                      [(t(r["created_at"]), r["kind"], Html(_pill(r["status"], "warn" if r["status"] in ("reserved", "claimed") else "dim")), r["contract"] or r["symbol"], r["cost"], r["broker_order_id"] or "", r["reason"]) for r in d["intents"]])
@@ -488,8 +490,8 @@ def render(d: dict, *, studio=None, desk=None) -> str:
 <a href="#cycles"><span aria-hidden="true">≡</span>Activity</a>
 <a href="#agent-chat"><span aria-hidden="true">◌</span>Chat</a>
 </nav><div class="sidebar-foot"><span class="paper-dot" aria-hidden="true"></span>Paper environment<p>No live-money orders.<br>Controls are read-only.</p></div></aside>
-<div class="app-shell"><header><div><span class="eyebrow">Workspace / Overview</span><h1>Dashboard</h1></div><div class="header-actions"><div class="meta"><span class="snapshot-label">Local snapshot</span><p>Rendered {_e(t(d['now']))}</p></div>{_pill('PAPER ONLY · READ-ONLY', 'warn')}<a class="chat-jump" href="#agent-chat">Open chat <span aria-hidden="true">↗</span></a></div></header>
-<div class="workspace"><fieldset class="agent-picker"><legend>Filter by role · changes the view, never trading permissions.</legend>{filters}<main>{status}{crew}{render_desk(desk)}{''.join(panels)}</main></fieldset>{chat}</div>
+<div class="app-shell"><header><div><span class="eyebrow">Workspace / Overview</span><h1>Mission control</h1></div><div class="header-actions"><div class="meta"><span class="snapshot-label">Local snapshot</span><p>Rendered {_e(t(d['now']))}</p></div>{_pill('PAPER ONLY · READ-ONLY', 'warn')}<a class="chat-jump" href="#agent-chat">Open chat <span aria-hidden="true">↗</span></a></div></header>
+<div class="workspace"><fieldset class="agent-picker"><legend>Filter by role · changes the view, never trading permissions.</legend>{filters}<main>{status}{render_desk(desk)}{crew}{''.join(panels)}</main></fieldset>{chat}</div>
 <footer>{footer}</footer></div>{scripts}</body></html>'''
 
 

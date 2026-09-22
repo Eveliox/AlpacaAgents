@@ -28,6 +28,21 @@ Repo: https://github.com/Eveliox/AlpacaAgents
 
 Support: `calendar.py` (NYSE sessions/holidays), `gateway.py` (control modes), `notify.py` (JSONL + optional webhook), `executor/eastern.py` (ET dates).
 
+### Dashboard presentation update (2026-09-22)
+
+Agent Desk is now expanded and prominent after the status/attention overview:
+midnight-blue/lilac surfaces, curved evidence links, per-view tasks, recorded
+status badges, pass-evidence meter, and collapsible technical details. Replay
+has a pause control, honors OS reduced motion and never animates unbuilt models
+as active. No live agent communication events were added; active/waiting states
+remain unverified. Trading/controller code and runtime approvals are unchanged.
+See `docs/PLAN-agent-desk.md` for behavior and preview instructions.
+
+Validation: 329 Python tests and 6 Node chat tests passed; Agent Desk offline and
+served browser suites plus dashboard static/served/fake-generative suites passed.
+Test temporary databases on the local SSD finished the full suite in ~50 seconds
+(compared with many minutes on E:). Check C: free space before using it for tests.
+
 ## 2. Owner's environment and account facts
 
 - **Alpaca paper account**: ACTIVE, options level 3, `multiplier=4` (margin — all paper accounts are), `pattern_day_trader=true`, $100k balance (owner did not create it at $2k; `capital_cap` bounds spendable cash to $2,000 regardless).
